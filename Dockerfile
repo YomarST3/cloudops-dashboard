@@ -34,6 +34,10 @@ COPY --from=build /app/api ./api
 COPY --from=build /app/server.mjs ./server.mjs
 COPY --from=build /app/package.json ./package.json
 
+# api/aws-pricing.ts importa este snapshot como fallback cuando la Price List
+# API no responde. Si falta, ese endpoint devuelve 500.
+COPY --from=build /app/src/data/awsPriceSnapshot.json ./src/data/awsPriceSnapshot.json
+
 # El servidor usa solo modulos nativos de Node: no hace falta node_modules.
 EXPOSE 3000
 
