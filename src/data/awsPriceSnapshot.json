@@ -1,0 +1,20 @@
+{
+  "generatedAt": "2026-09-30T00:19:33.031Z",
+  "source": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/{OfferCode}/current/us-east-1/index.json",
+  "region": "us-east-1",
+  "hoursPerMonth": 720,
+  "items": {
+    "ec2": {
+      "unitMonthly": 59.9,
+      "hourly": 0.0832,
+      "sku": "HBVJM3Q9S8K6MNPJ",
+      "detail": "Amazon EC2 t3.large · Linux · Shared · on-demand (us-east-1)"
+    },
+    "rds": {
+      "unitMonthly": 92.88,
+      "hourly": 0.129,
+      "sku": "SCBZU9XX357QUA4D",
+      "detail": "Amazon RDS db.t4g.medium · PostgreSQL · Multi-AZ · on-demand (us-east-1)"
+    }
+  }
+}

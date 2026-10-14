@@ -1,0 +1,3 @@
+# Referencia del proyecto de Supabase.
+# Rellena con `supabase link --project-ref <tu-project-ref>`.
+project_id = "TU_PROJECT_REF_AQUI"

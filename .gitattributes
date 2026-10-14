@@ -1,0 +1,12 @@
+# Normaliza finales de linea entre Windows y Linux/macOS.
+# Sin esto, cada archivo aparece como modificado en un solo sistema.
+* text=auto eol=lf
+
+# Archivos que deben guardarse tal cual
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.pdf binary

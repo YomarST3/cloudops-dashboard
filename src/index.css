@@ -1,0 +1,135 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-800 font-sans antialiased transition-colors duration-200;
+  }
+
+  .dark body {
+    @apply bg-[#0B1120] text-slate-100;
+  }
+}
+
+/* Custom scrollbar for tables and code previews */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #334155;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Custom pulse animations for network flows */
+@keyframes flowLine {
+  0% {
+    stroke-dashoffset: 24;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+.flow-active {
+  stroke-dasharray: 6 6;
+  animation: flowLine 1s linear infinite;
+}
+
+/* Mapa mundial: gradiente del oceano y relieve de la tierra.
+   Definidos aqui porque `stop-color` y `filter` sobre <stop> de un <defs>
+   inline no los generan las utilidades de Tailwind de forma fiable. */
+.map-ocean-from {
+  stop-color: #e2e8f0;
+}
+
+.map-ocean-to {
+  stop-color: #cbd5e1;
+}
+
+.dark .map-ocean-from {
+  stop-color: #0f172a;
+}
+
+.dark .map-ocean-to {
+  stop-color: #020617;
+}
+
+.map-land-shadow {
+  filter: drop-shadow(0 1px 1.5px rgba(15, 23, 42, 0.16));
+}
+
+.dark .map-land-shadow {
+  filter: none;
+}
+
+.no-print {
+  display: none;
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 1.5cm;
+  }
+
+  body,
+  #root,
+  .dark body {
+    background: #ffffff !important;
+    color: #1e293b !important;
+  }
+
+  header,
+  nav,
+  aside,
+  button,
+  select,
+  .no-print {
+    display: none !important;
+  }
+
+  [class*='animate-in'],
+  [class*='fade-in'] {
+    animation: none !important;
+  }
+
+  [class*='lg:pl-72'] {
+    padding-left: 0 !important;
+  }
+
+  .dark [class*='dark:bg-'] {
+    background-color: #ffffff !important;
+  }
+
+  .dark [class*='dark:text-'] {
+    color: #1e293b !important;
+  }
+
+  .card,
+  .chart-container,
+  [class*='rounded-'],
+  .grid > div {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  .print-break-before {
+    break-before: page !important;
+    page-break-before: always !important;
+  }
+}
