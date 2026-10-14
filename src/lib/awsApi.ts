@@ -1,3 +1,5 @@
+import type { ProjectAnalysisResult } from '../types/cloud';
+
 export interface AwsPriceItem {
   unitMonthly: number;
   detail: string;
@@ -79,6 +81,32 @@ export interface AwsIpRangesResponse {
 
 const cache = new Map<string, { expires: number; data: unknown }>();
 
+/**
+ * Convierte la respuesta en JSON, o explica con claridad que fallo.
+ *
+ * El caso habitual: un host que no ejecuta las funciones de `api/` deja que la
+ * regla de fallback de la SPA conteste con index.html y HTTP 200. El codigo ve
+ * `ok === true` e intenta parsear HTML, y el navegador lanza un
+ * "Unexpected token '<'" que no dice nada util.
+ */
+async function parseJsonOrThrow<T>(response: Response, url: string): Promise<T> {
+  const text = await response.text();
+
+  if (text.trimStart().startsWith('<')) {
+    throw new Error(
+      `El servidor devolvio una pagina HTML en lugar de datos para ${url}. ` +
+        `Las funciones de /api no estan desplegadas en este entorno: solo las ejecuta Vercel. ` +
+        `Para servirlas aqui, arranca con "node server.mjs" (npm start).`
+    );
+  }
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`Respuesta no valida de ${url}: ${text.slice(0, 120)}`);
+  }
+}
+
 export async function fetchJson<T>(url: string, cacheTtlMs = 4 * 60 * 1000): Promise<T> {
   const cached = cache.get(url);
   if (cached && cached.expires > Date.now()) return cached.data as T;
@@ -92,7 +120,7 @@ export async function fetchJson<T>(url: string, cacheTtlMs = 4 * 60 * 1000): Pro
     clearTimeout(timer);
   }
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const data = (await response.json()) as T;
+  const data = await parseJsonOrThrow<T>(response, url);
   cache.set(url, { expires: Date.now() + cacheTtlMs, data });
   return data;
 }
@@ -138,5 +166,5 @@ export async function analyzeProject(payload: AiAnalyzeRequest) {
     const err = await response.text().catch(() => `HTTP ${response.status}`);
     throw new Error(err || `HTTP ${response.status}`);
   }
-  return response.json();
+  return parseJsonOrThrow<ProjectAnalysisResult>(response, '/api/ai-analyze');
 }

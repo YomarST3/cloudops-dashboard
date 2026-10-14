@@ -69,6 +69,9 @@
 cloudops-dashboard/
 ├── index.html
 ├── package.json
+├── server.mjs                 # Servidor de produccion portable (SPA + /api/*)
+├── Dockerfile                 # Build y runtime para contenedores
+├── docker-compose.yml
 ├── postcss.config.js
 ├── tailwind.config.js
 ├── tsconfig.json
@@ -222,6 +225,56 @@ Si no hay `.env`, el dashboard arranca igual en **modo local**: guarda todo en `
 ### Despliegue en Vercel
 
 Añade `VITE_SUPABASE_URL` y `VITE_SUPABASE_PUBLISHABLE_KEY` en *Project Settings → Environment Variables*. Vite las incrusta en tiempo de build, así que hay que **re-desplegar** tras cambiarlas. Las funciones de `api/` se despliegan automáticamente.
+
+---
+
+## 🐳 Despliegue en contenedores y Node
+
+> [!IMPORTANT]
+> **Los archivos de `api/` solo los ejecuta el runtime de Vercel.** En cualquier otro host (contenedor, nginx, Apache, servidor estático) la carpeta `api/` no hace nada: no es código que se ejecute, son funciones serverless.
+>
+> Sin ellas, `/api/analizar` cae en la regla de fallback de la SPA y devuelve el `index.html`. El navegador recibe HTML donde esperaba JSON y falla con `Unexpected token '<', "<!doctype"... is not valid JSON`.
+
+`server.mjs` resuelve eso: sirve la SPA **y** ejecuta los handlers de `api/` en el mismo proceso. Sin dependencias externas, solo `node:http`.
+
+```bash
+npm ci
+npm run build
+npm start            # node server.mjs
+```
+
+Variables opcionales: `PORT` (3000) y `HOST` (`0.0.0.0`).
+
+**Requiere Node 22.18 o superior**, que es cuando el type stripping de `.ts` se volvió estable. Es lo que permite importar `api/*.ts` directamente, sin paso de compilación.
+
+### Con Docker
+
+```bash
+cp .env.example .env      # rellena las dos variables
+docker compose up -d --build
+```
+
+O manualmente:
+
+```bash
+docker build \
+  --build-arg VITE_SUPABASE_URL=https://TU-PROYECTO.supabase.co \
+  --build-arg VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_... \
+  -t cloudops-dashboard .
+docker run -d -p 3000:3000 --name cloudops-dashboard cloudops-dashboard
+```
+
+Las dos variables son **build args**, no variables de runtime: Vite las incrusta en el bundle durante el build. Cambiarlas exige reconstruir la imagen.
+
+> Si tu contenedor ya corre nginx/apache sirviendo `dist/`, sustituye ese servidor por `node server.mjs`: las rutas `/api/*` dejan de pasar por el fallback de la SPA y se ejecutan de verdad.
+
+### Los tres entornos
+
+| Entorno | Quién ejecuta `api/` | Cómo |
+|---|---|---|
+| Vercel | El runtime de Vercel | Despliegue automático, no interviene `server.mjs` |
+| `npm run dev` | `vite-plugin-api-dev.ts` | Carga los handlers con `ssrLoadModule` |
+| Contenedor / Node | `server.mjs` | `npm start` |
 
 ---
 

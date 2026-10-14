@@ -1,0 +1,21 @@
+node_modules
+dist
+.git
+.github
+.vercel
+
+# Secretos: nunca deben entrar en la imagen
+.env
+.env.*
+!.env.example
+
+*.log
+dev-server.log
+pull.log
+.DS_Store
+.vscode
+.idea
+
+# Documentacion y utilidades que no hacen falta en runtime
+README.md
+scripts

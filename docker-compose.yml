@@ -1,0 +1,33 @@
+# Ejemplo de despliegue con Docker.
+#
+#   cp .env.example .env   (rellena VITE_SUPABASE_URL y VITE_SUPABASE_PUBLISHABLE_KEY)
+#   docker compose up -d --build
+#
+# La app queda en http://localhost:3000
+
+services:
+  cloudops:
+    build:
+      context: .
+      args:
+        # Las variables se incrustan en el bundle durante el build.
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_PUBLISHABLE_KEY: ${VITE_SUPABASE_PUBLISHABLE_KEY}
+    image: cloudops-dashboard:latest
+    container_name: cloudops-dashboard
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    environment:
+      PORT: '3000'
+      HOST: '0.0.0.0'
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
