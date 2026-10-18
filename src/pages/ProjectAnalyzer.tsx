@@ -1154,10 +1154,29 @@ export const ProjectAnalyzer: React.FC = () => {
             <div className="relative z-10 flex flex-col sm:flex-row sm:items-center gap-6">
               {/* Score circle */}
               <div className="flex flex-col items-center">
-                <div className={`w-24 h-24 rounded-full bg-gradient-to-br ${scoreBg(result.overallSecurityScore)} flex items-center justify-center shadow-lg`}>
-                  <span className="text-3xl font-extrabold text-white">{result.overallSecurityScore}</span>
+                {/*
+                  El titular ya no es el indice 0-100. Ese numero solo decia
+                  "ninguno de mis 15 patrones disparo", y presentarlo como
+                  "seguridad" era una afirmacion que la herramienta no puede
+                  sostener. Ahora manda el porcentaje de archivos afectados,
+                  que es lo que publican las herramientas de verdad y se puede
+                  comprobar.
+                */}
+                <div className={`w-24 h-24 rounded-full bg-gradient-to-br ${scoreBg(100 - (result.coverage?.vulnerabilityFileRate ?? 0))} flex items-center justify-center shadow-lg`}>
+                  <span className="text-3xl font-extrabold text-white">
+                    {result.coverage ? `${result.coverage.vulnerabilityFileRate}%` : result.overallSecurityScore}
+                  </span>
                 </div>
-                <span className="text-xs font-bold mt-2 opacity-80">{scoreLabel(result.overallSecurityScore)}</span>
+                <span className="text-xs font-bold mt-2 opacity-80 text-center leading-tight">
+                  {result.coverage
+                    ? 'de los archivos tiene\nuna vulnerabilidad'
+                    : scoreLabel(result.overallSecurityScore)}
+                </span>
+                {result.coverage && (
+                  <span className="text-[10px] opacity-60 mt-0.5">
+                    {result.coverage.filesWithVulnerabilities} de {result.coverage.filesAnalyzed} archivos
+                  </span>
+                )}
               </div>
 
               <div className="flex-1">
@@ -1167,6 +1186,41 @@ export const ProjectAnalyzer: React.FC = () => {
                 </div>
                 <h2 className="text-xl sm:text-2xl font-extrabold mb-2">{result.projectName}</h2>
                 <p className="text-sm text-slate-300 leading-relaxed">{result.summary}</p>
+
+                {result.coverage && (
+                  <div className="flex flex-wrap gap-x-5 gap-y-1 mt-3">
+                    {[
+                      {
+                        k: 'Archivos con alguna observación',
+                        v: `${result.coverage.fileIssueRate}% (${result.coverage.filesWithFindings}/${result.coverage.filesAnalyzed})`,
+                      },
+                      {
+                        k: 'Observaciones por 1.000 líneas',
+                        v: String(result.coverage.findingsPerThousandLines),
+                      },
+                      {
+                        k: 'Índice de riesgo ponderado',
+                        v: `${result.overallSecurityScore}/100`,
+                      },
+                    ].map((s) => (
+                      <span key={s.k} className="text-[11px]">
+                        <span className="text-slate-400">{s.k}: </span>
+                        <span className="font-semibold text-slate-200">{s.v}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Alcance del análisis. Decirlo no resta credibilidad: al revés,
+                    es lo que distingue una herramienta honesta de una que vende
+                    humo. */}
+                {result.coverage && (
+                  <p className="text-[11px] text-slate-400 mt-2 max-w-xl">
+                    Análisis basado en <strong className="text-slate-300">{result.coverage.rulesApplied} patrones</strong>
+                    {result.aiEnabled ? ' más una revisión con IA' : ''}. No es una auditoría completa: una
+                    herramienta comercial evalúa cientos de reglas derivadas de OWASP Top 10 y CWE.
+                  </p>
+                )}
               </div>
 
               {/* Estado de la segunda capa (IA). Distingue "no se pidió" de
@@ -1306,10 +1360,17 @@ export const ProjectAnalyzer: React.FC = () => {
                         {result.scoreBreakdown.map((l) => l.penalty).join(' − ')}{' '}
                         = <strong>{result.overallSecurityScore}</strong>
                       </p>
+                      <p className="text-xs text-slate-400 mb-2">
+                        Índice de riesgo ponderado: cuánto resta cada hallazgo según su severidad.
+                        No mide el porcentaje de código afectado, que está arriba.
+                      </p>
                       <ul className="space-y-1">
                         {result.scoreBreakdown.map((l, i) => (
                           <li key={i} className="text-xs text-slate-500 dark:text-slate-400 font-mono">
                             −{l.penalty} · {l.label}
+                            {l.occurrences ? (
+                              <span className="text-slate-400"> (×{l.occurrences})</span>
+                            ) : null}
                           </li>
                         ))}
                       </ul>

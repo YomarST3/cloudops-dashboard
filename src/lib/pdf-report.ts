@@ -298,7 +298,7 @@ export async function generateAnalysisReportPdf(
   y += 7;
 
   const cards = [
-    { label: 'Puntaje de seguridad', value: `${num(result.overallSecurityScore)}/100`, rgb: scoreColor(num(result.overallSecurityScore)) },
+    { label: 'Archivos con vulnerabilidad', value: result.coverage ? `${num(result.coverage.vulnerabilityFileRate)}%` : `${num(result.overallSecurityScore)}/100`, rgb: result.coverage ? scoreColor(num(100 - result.coverage.vulnerabilityFileRate)) : scoreColor(num(result.overallSecurityScore)) },
     { label: 'Controles de cumplimiento', value: `${num(result.complianceScore)}%`, rgb: scoreColor(num(result.complianceScore)) },
     { label: 'Vulnerabilidades', value: `${num(result.totalFindings)}`, rgb: BODY as [number, number, number] },
   ];
@@ -360,6 +360,52 @@ export async function generateAnalysisReportPdf(
     doc.setFontSize(9);
     doc.setTextColor(...BODY);
     y = paragraph(pdf, result.summary, MARGIN, y, CONTENT_W, { gap: 4, topMargin: 2 });
+  }
+
+  // ── 1b. Alcance del análisis ──────────────────────────────────────────────
+  // Ponerlo por escrito es lo que hace defendible el informe: una herramienta
+  // que declara cuantas reglas aplicó puede contrastarse; una que dice
+  // "seguridad" a secas, no. Las cifras de cobertura son las que dicen cuanto
+  // del proyecto esta afectado, y por eso van antes que el indice 0-100.
+  if (result.coverage) {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(...BRAND_DARK);
+    doc.text('ALCANCE DEL ANALISIS', MARGIN, y);
+    y += 7;
+
+    const alcance: Array<[string, string]> = [
+      ['Archivos con alguna observacion', `${num(result.coverage.fileIssueRate)}%  (${result.coverage.filesWithFindings} de ${result.coverage.filesAnalyzed})`],
+      ['Archivos con vulnerabilidad', `${num(result.coverage.vulnerabilityFileRate)}%  (${result.coverage.filesWithVulnerabilities} de ${result.coverage.filesAnalyzed})`],
+      ['Observaciones por 1.000 lineas', String(result.coverage.findingsPerThousandLines)],
+      ['Indice de riesgo ponderado', `${num(result.overallSecurityScore)}/100  (penalizacion por severidad, no mide codigo afectado)`],
+      ['Reglas aplicadas', `${result.coverage.rulesApplied} patrones${result.aiEnabled ? ' + revision con IA' : ''}`],
+    ];
+
+    autoTable(doc, {
+      startY: y,
+      body: alcance.map<RowInput>(([k, v]) => [
+        { content: k, styles: { fontStyle: 'bold' } },
+        v,
+      ]),
+      theme: 'plain',
+      styles: { fontSize: 8.5, cellPadding: 1.6, textColor: BODY },
+      columnStyles: { 0: { cellWidth: 92, textColor: MUTED } },
+      margin: { left: MARGIN, right: MARGIN },
+    });
+    y = tableEndY(doc, y) + 4;
+
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(7.5);
+    doc.setTextColor(...MUTED);
+    y = paragraph(
+      pdf,
+      'No es una auditoria completa: una herramienta comercial evalua cientos de reglas derivadas de OWASP Top 10 y CWE. Este informe aplica las reglas indicadas arriba.',
+      MARGIN,
+      y,
+      CONTENT_W,
+      { gap: 4 }
+    );
   }
 
   // ── 3. Distribucion por severidad ─────────────────────────────────────────
@@ -480,14 +526,18 @@ export async function generateAnalysisReportPdf(
       return [
         { content: SEVERITY[f.severity].label, styles: { textColor: tint, fontStyle: 'bold' } },
         f.category,
-        // El sufijo deja claro en el PDF que capa detecto el hallazgo, igual
-        // que hace la etiqueta "IA" en la pantalla.
-        f.source === 'ai' ? `${f.title}  [IA]` : f.title,
-        // Archivo y linea reales: lo que permite abrir el codigo y comprobar
-        // el hallazgo. Antes solo ponia la carpeta, que no senala nada.
-        f.file ?? f.affectedModule,
-        f.line ? `L${f.line}` : '-',
-        f.cweId ?? '-',
+// El sufijo deja claro que capa detecto el hallazgo, igual que la etiqueta
+          // "IA" en pantalla; y el (xN) avisa de que el problema se repite.
+          f.source === 'ai'
+            ? `${f.title}  [IA]${f.occurrences && f.occurrences > 1 ? ` (x${f.occurrences})` : ''}`
+            : f.occurrences && f.occurrences > 1
+              ? `${f.title}  (x${f.occurrences})`
+              : f.title,
+          // Archivo y linea reales: lo que permite abrir el codigo y comprobar
+          // el hallazgo. Antes solo ponia la carpeta, que no senala nada.
+          f.file ?? f.affectedModule,
+          f.line ? `L${f.line}` : '-',
+          f.cweId ?? '-',
       ];
     });
 

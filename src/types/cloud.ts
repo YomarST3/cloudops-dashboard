@@ -149,6 +149,15 @@ export interface SecurityFinding {
   /** Linea real dentro de `file`. */
   line?: number;
   /**
+   * Cuantas veces aparece el problema en el modulo. Antes el motor solo
+   * registraba UN hallazgo por patron y modulo, asi que 5 inyecciones SQL y una
+   * inyeccion daban el mismo resultado, y el analisis no podia distinguir un
+   * problema aislado de un problema generalizado.
+   */
+  occurrences?: number;
+  /** Hasta las primeras localizaciones, para poder abrir varias de un vistazo. */
+  locations?: { file: string; line: number }[];
+  /**
    * Consejo de endurecimiento que NO es una vulnerabilidad, del tipo "tienes
    * imports" o "no validas el env". Esas categorias salían en casi cualquier
    * proyecto real, asi que penalizarlas hacia que el score fuera bajo sin que
@@ -177,6 +186,34 @@ export interface ScoreLine {
   label: string;
   severity: SecurityFindingSeverity;
   penalty: number;
+  /** Cuantas veces se repite el problema en ese modulo. */
+  occurrences?: number;
+}
+
+/**
+ * Metricas de cobertura, que son las que dicen de verdad cuanto del proyecto
+ * esta afectado. El indice 0-100 no sirve para eso: 100 puntos solo significan
+ * "ninguno de mis 15 patrones disparo en este modulo".
+ *
+ * Son las cifras que publican las herramientas de verdad (SonarQube habla de
+ * "% de archivos con problemas"), y las que caen en rangos razonables: un
+ * proyecto pequeño y bien construido se situa en el 1-5%, no en el 95%.
+ */
+export interface CoverageMetrics {
+  /** Archivos de codigo que se llegaron a analizar. */
+  filesAnalyzed: number;
+  /** Archivos con al menos una observacion (vulnerabilidad o recomendacion). */
+  filesWithFindings: number;
+  /** Archivos con al menos una vulnerabilidad real. */
+  filesWithVulnerabilities: number;
+  /** % de archivos con alguna observacion, con un decimal. */
+  fileIssueRate: number;
+  /** % de archivos con una vulnerabilidad real, con un decimal. */
+  vulnerabilityFileRate: number;
+  /** Observaciones por cada 1000 lineas de codigo, con dos decimales. */
+  findingsPerThousandLines: number;
+  /** Cuantas reglas se aplicaron. Sirve para decir el alcance del analisis. */
+  rulesApplied: number;
 }
 
 export interface ModuleAnalysis {
@@ -248,6 +285,11 @@ export interface ProjectAnalysisResult {
   scoreBreakdown?: ScoreLine[];
   /** Cuantos hallazgos son recomendaciones y no vulnerabilidades. */
   advisoryCount?: number;
+  /**
+   * Las cifras de cobertura. Opcionales: los analisis anteriores no las traen,
+   * y sin ellas la interfaz cae a mostrar solo el indice 0-100.
+   */
+  coverage?: CoverageMetrics;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

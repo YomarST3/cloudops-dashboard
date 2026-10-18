@@ -275,6 +275,8 @@ interface ScoreLine {
   label: string;
   severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
   penalty: number;
+  /** Cuantas veces se repite el problema en ese modulo. */
+  occurrences?: number;
 }
 
 const SEV_PENALTY: Record<'critical' | 'high' | 'medium' | 'low' | 'info', number> = {
@@ -295,13 +297,14 @@ function loc(f: { file?: string; line?: number; affectedModule: string }): strin
  * Las restas del score, una linea por hallazgo puntuable. Sirve para que la
  * interfaz pueda enseñar "100 - 25 - 15 = 60" en vez de un 60 suelto.
  */
-function buildScoreBreakdown(findings: { advisory?: boolean; title: string; severity: keyof typeof SEV_PENALTY; file?: string; line?: number; affectedModule: string }[]): ScoreLine[] {
+function buildScoreBreakdown(findings: { advisory?: boolean; title: string; severity: keyof typeof SEV_PENALTY; file?: string; line?: number; affectedModule: string; occurrences?: number }[]): ScoreLine[] {
   return findings
     .filter((f) => !f.advisory)
     .map((f) => ({
       label: `${f.title} — ${loc(f)}`,
       severity: f.severity,
       penalty: SEV_PENALTY[f.severity] ?? 0,
+      occurrences: f.occurrences,
     }))
     .sort((a, b) => b.penalty - a.penalty);
 }
@@ -452,6 +455,89 @@ function insecureRandomIsAdvisory({ line }: FindingContext): boolean {
   return !SECURITY_WORD.test(line);
 }
 
+// ─── Conteo real de ocurrencias ──────────────────────────────────────────────
+//
+// El motor usaba pattern.exec(content), que devuelve UN solo match: un modulo
+// con cinco inyecciones SQL generaba el mismo hallazgo que uno con una. Eso
+// hacia que el analisis no distinguiera un fallo aislado de un problema
+// generalizado, y hacia que el indice 0-100 fuera casi binario.
+//
+// Ahora se cuentan todas las apariciones, se guarda el total y las primeras
+// localizaciones. Sigue habiendo UNA tarjeta por patron y modulo (veinte
+// tarjetas de lo mismo no ayudan a nadie), pero la tarjeta dice cuantas veces
+// ocurre y donde, y las metricas de cobertura usan el total real.
+
+/** Cuantas localizaciones se guardan por hallazgo. */
+const MAX_LOCATIONS = 5;
+
+/**
+ * Ejecuta el patron en modo global y devuelve todas las coincidencias.
+ *
+ * Se crea un RegExp nuevo con flag /g porque uno con /g es stateful (guarda
+ * lastIndex) y reutilizarlo daria resultados alternos. Los patrones que casan
+ * cadena vacia se saltan con un avance manual, o el bucle no termina.
+ */
+function matchAll(
+  pattern: RegExp,
+  content: string
+): { total: number; offsets: number[] } {
+  const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
+  const re = new RegExp(pattern.source, flags);
+
+  let total = 0;
+  const offsets: number[] = [];
+  let m: RegExpExecArray | null;
+
+  while ((m = re.exec(content)) !== null) {
+    total++;
+    // Solo guardamos las primeras: un patron puede aparecer miles de veces y
+    // guardarlas todas haria la respuesta enorme sin aportar nada.
+    if (offsets.length < MAX_LOCATIONS) offsets.push(m.index);
+    if (m[0].length === 0) re.lastIndex++;
+  }
+
+  return { total, offsets };
+}
+
+// ─── Metricas de cobertura ───────────────────────────────────────────────────
+
+interface CoverageInput {
+  filesAnalyzed: number;
+  totalLines: number;
+  findings: { file?: string; advisory?: boolean }[];
+  rulesApplied: number;
+}
+
+/**
+ * Cuanto del proyecto esta afectado de verdad. Son las cifras que publican las
+ * herramientas comerciales, y las que un humano puede comprobar: "el 2,9% de
+ * los archivos tiene alguna observacion" se defiende; "95/100 de seguridad" no.
+ */
+function buildCoverage(input: CoverageInput) {
+  const withFile = input.findings.filter((f) => Boolean(f.file));
+
+  const filesWithFindings = new Set(withFile.map((f) => f.file as string)).size;
+  const filesWithVulnerabilities = new Set(
+    withFile.filter((f) => !f.advisory).map((f) => f.file as string)
+  ).size;
+
+  const rate = (n: number) =>
+    input.filesAnalyzed > 0 ? Math.round((n / input.filesAnalyzed) * 1000) / 10 : 0;
+
+  return {
+    filesAnalyzed: input.filesAnalyzed,
+    filesWithFindings,
+    filesWithVulnerabilities,
+    fileIssueRate: rate(filesWithFindings),
+    vulnerabilityFileRate: rate(filesWithVulnerabilities),
+    findingsPerThousandLines:
+      input.totalLines > 0
+        ? Math.round((input.findings.length / input.totalLines) * 1000 * 100) / 100
+        : 0,
+    rulesApplied: input.rulesApplied,
+  };
+}
+
 // ─── Motor de análisis ───────────────────────────────────────────────────────
 
 function analyzeModule(
@@ -472,10 +558,17 @@ function analyzeModule(
   const findings: ReturnType<typeof buildFinding>[] = [];
 
   for (const def of SECURITY_PATTERNS) {
-    const match = def.pattern.exec(content);
-    if (match) {
-      findings.push(buildFinding(def, match, `${idPrefix}-${def.id}`, module));
-    }
+    // Se cuentan TODAS las apariciones, no solo la primera. Antes un modulo con
+    // cinco inyecciones SQL y otro con una daban exactamente el mismo hallazgo.
+    const { total, offsets } = matchAll(def.pattern, content);
+    if (total === 0) continue;
+
+    const first = def.pattern.exec(content);
+    if (!first) continue;
+
+    findings.push(
+      buildFinding(def, first, `${idPrefix}-${def.id}`, module, { total, offsets })
+    );
   }
 
   // Score y estado: los calcula scoreOf/statusOf, la MISMA formula que aplica
@@ -501,7 +594,8 @@ function buildFinding(
   def: FindingDef,
   match: RegExpExecArray,
   id: string,
-  module: FileModule
+  module: FileModule,
+  counts: { total: number; offsets: number[] }
 ) {
   // Traduce el offset del match a archivo y linea reales. Sin esto un hallazgo
   // no se puede señalar en el codigo, que es lo que hacia el analisis
@@ -511,6 +605,14 @@ function buildFinding(
   // El subsistema ("Base de Datos / DAL") que daba cada patron se ha
   // eliminado: era una etiqueta inventada que no coincidia con el modulo real y
   // ocupaba el sitio del dato util. El tipo de problema sigue en `category`.
+
+  // Cada offset se traduce a su archivo y linea, para poder abrir varias
+  // apariciones del mismo problema de un vistazo.
+  const extraLocations: { file: string; line: number }[] = [];
+  for (const offset of counts.offsets.slice(1)) {
+    const at = locate(module, offset);
+    if (at) extraLocations.push({ file: at.file, line: at.line });
+  }
 
   return {
     id,
@@ -524,6 +626,8 @@ function buildFinding(
     cweId: def.cweId,
     file: where?.file,
     line: where?.line,
+    occurrences: counts.total,
+    locations: extraLocations.length > 0 ? extraLocations : undefined,
     advisory:
       def.advisory === true ||
       (def.advisoryWhen ? def.advisoryWhen({ line: where?.text || match[0], file: where?.file || '', match: match[0] }) : false)
@@ -878,6 +982,16 @@ export function analyzeCode(input: AnalyzeInput = {}): ProjectAnalysisResult {
   );
   const advisoryCount = dedupedFindings.filter((f) => f.advisory).length;
 
+  // Cifras de cobertura: cuanto del proyecto esta afectado de verdad. Son las
+  // que dicen algo comprobable, a diferencia del indice 0-100, que solo indica
+  // cuantos de los 15 patrones dispararon.
+  const coverage = buildCoverage({
+    filesAnalyzed: analyzedModules.reduce((a, m) => a + (m.fileCount ?? 0), 0),
+    totalLines: analysisTarget.split('\n').length,
+    findings: dedupedFindings,
+    rulesApplied: SECURITY_PATTERNS.length,
+  });
+
   // Determinar tamaño de infraestructura según código/descripción
   const linesOfCode = analysisTarget.split('\n').length;
   const infrastructureSize = (linesOfCode < 100
@@ -923,6 +1037,7 @@ export function analyzeCode(input: AnalyzeInput = {}): ProjectAnalysisResult {
     complianceControls,
     scoreBreakdown,
     advisoryCount,
+    coverage,
     inputType,
     languages,
     frameworks,
@@ -1020,6 +1135,14 @@ export function applyAiFindings(
     complianceControls,
     advisoryCount,
     scoreBreakdown: buildScoreBreakdown(modules.flatMap((m) => m.findings)),
+    coverage: buildCoverage({
+      // El total de archivos se conserva del analisis original: los modulos no
+      // cambian al fusionar, solo sus hallazgos.
+      filesAnalyzed: base.coverage?.filesAnalyzed ?? modules.reduce((a, m) => a + (m.fileCount ?? 0), 0),
+      totalLines: (target || ' ').split('\n').length,
+      findings: dedupedFindings,
+      rulesApplied: base.coverage?.rulesApplied ?? SECURITY_PATTERNS.length,
+    }),
     modules,
     summary: buildSummary(overallScore, critical, high, vulnFindings.length),
   };
