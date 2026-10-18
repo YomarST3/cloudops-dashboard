@@ -25,6 +25,15 @@ interface FindingDef {
    * Copia literal de src/lib/server/analyze.ts (ver el aviso de duplicacion).
    */
   advisory?: boolean;
+  /**
+   * Decide, con el contexto real de la linea, si lo encontrado es una
+   * vulnerabilidad o solo un consejo. Se usa donde el regex es necesariamente
+   * amplio: un "password: \"algo\"" puede ser una credencial o la etiqueta de
+   * un campo de formulario, y "Math.random()" puede generar un token o elegir
+   * el ancho de un esqueleto de carga. Nada se oculta: el hallazgo se sigue
+   * viendo con su archivo y su linea, solo deja de bajar el puntaje.
+   */
+  advisoryWhen?: (ctx: { line: string; file: string; match: string }) => boolean;
 }
 
 // ─── Patrones de análisis de seguridad ───────────────────────────────────────
@@ -51,6 +60,7 @@ const SECURITY_PATTERNS: FindingDef[] = [
     cweId: 'CWE-798',
     pattern: /(?:password|passwd|secret|api_?key|apikey|token|auth_?token|private_?key)\s*[:=]\s*["'][^"']{6,}/i,
     lineHint: (m) => `Secreto detectado: "${m[0].substring(0, 50).replace(/(["'][^"']{3})[^"']*(["'])/g, '$1***$2')}..."`,
+    advisoryWhen: hardcodedSecretIsAdvisory,
   },
   {
     id: 'xss-vulnerability',
@@ -82,6 +92,7 @@ const SECURITY_PATTERNS: FindingDef[] = [
     recommendation: 'Usar crypto.randomUUID(), crypto.randomBytes() (Node.js) o window.crypto.getRandomValues() para valores de seguridad.',
     cweId: 'CWE-338',
     pattern: /Math\.random\(\)/,
+    advisoryWhen: insecureRandomIsAdvisory,
   },
   {
     id: 'cors-wildcard',
@@ -365,17 +376,28 @@ interface FileModule {
 }
 
 /**
- * Localiza un offset del contenido del modulo: devuelve archivo y linea real.
- * Copia literal de src/lib/server/modules.ts (ver el aviso de duplicacion).
+ * Localiza un offset del contenido del modulo: devuelve archivo, linea real y
+ * el texto de esa linea. Copia literal de src/lib/server/modules.ts (ver el
+ * aviso de duplicacion).
  */
-function locate(module: FileModule, offset: number): { file: string; line: number } | null {
+function locate(
+  module: FileModule,
+  offset: number
+): { file: string; line: number; text: string } | null {
   if (module.spans.length === 0) return null;
 
-  const line = module.content.slice(0, offset).split('\n').length;
+  const before = module.content.slice(0, offset);
+  const line = before.split('\n').length;
   const span = module.spans.find((s) => line >= s.startLine && line <= s.endLine);
   if (!span) return null;
 
-  return { file: span.path, line: line - span.startLine + 1 };
+  // La línea COMPLETA, no la que empieza en el match: las palabras que deciden
+  // si el hallazgo es real suelen estar ANTES de donde casó el regex.
+  const lineStart = before.lastIndexOf('\n') + 1;
+  const lineEnd = module.content.indexOf('\n', offset);
+  const text = module.content.slice(lineStart, lineEnd === -1 ? undefined : lineEnd).trim();
+
+  return { file: span.path, line: line - span.startLine + 1, text };
 }
 
 /**
@@ -632,6 +654,69 @@ function complianceScoreOf(controls: ComplianceControl[]): number {
   return Math.round((passed / controls.length) * 100);
 }
 
+// ─── Contexto: real o solo consejo ───────────────────────────────────────────
+//
+// El problema que resuelve esto: algunos regex son inevitably laxos, y un
+// patron flojo produce falsos positivos que arruinan el analisis. Se comprobo
+// en un proyecto real: `authPassword: "Contrasena"` dentro de un diccionario
+// i18n salia como CREDENCIAL CRITICA, y un `Math.random()` que solo elegia el
+// ancho de un esqueleto de carga salia como criptografia rota.
+//
+// La alternativa a afinar el regex hasta hacerlo ilegible es dejar el regex
+// amplio y decidir aqui, con el contexto real de la linea, si lo que se ha
+// encontrado es una vulnerabilidad de verdad o un consejo de buena practica.
+//
+// Importante: nada se oculta. Un hallazgo marcado como recomendacion se sigue
+// mostrando en pantalla y en el PDF, con su archivo y su linea. Lo unico que
+// deja de hacer es bajar el puntaje.
+
+/** Un valor que parece una credencial y no una frase. */
+function looksLikeSecretValue(value: string): boolean {
+  return /[0-9]/.test(value) || /[_\-./+=]{2,}/.test(value) || value.length >= 24;
+}
+
+/** Archivos que guardan textos de la interfaz, no credenciales. */
+const TRANSLATION_PATH =
+  /(^|[\\/])(i18n|locale|locales|loc|translation|translations|lang|languages|strings)([\\/._-]|$)/i;
+
+/** Palabras que delatan que la aleatoriedad se usa con fines de seguridad. */
+const SECURITY_WORD =
+  /\b(token|secret|session|password|passwd|key|salt|nonce|otp|jwt|csrf|reset|uuid|identifier|user_?id)\b/i;
+
+interface FindingContext {
+  /** Texto de la linea donde se ha encontrado, o el propio match si no hay linea. */
+  line: string;
+  file: string;
+  /** El texto exacto que hizo casar el regex. */
+  match: string;
+}
+
+const firstQuoted = (text: string): string => {
+  const m = text.match(/["'`]([^"'`]*)["'`]/);
+  return m ? m[1] : '';
+};
+
+/**
+ * Un "secreto" solo cuenta como vulnerabilidad si el valor parece una
+ * credencial. Se mantiene amplio a proposito: una contraseña debil como "admin"
+ * se cuela como recomendacion, pero SE MUESTRA, que es preferible a declarar
+ * critico un texto de traduccion.
+ */
+function hardcodedSecretIsAdvisory({ line, file }: FindingContext): boolean {
+  if (file && TRANSLATION_PATH.test(file)) return true;
+  const value = firstQuoted(line);
+  if (!value) return false;
+  return !looksLikeSecretValue(value);
+}
+
+/**
+ * Math.random() solo es un problema cuando genera algo con valor de seguridad.
+ * Usarlo para el ancho de un esqueleto, un color o una animacion es correcto.
+ */
+function insecureRandomIsAdvisory({ line }: FindingContext): boolean {
+  return !SECURITY_WORD.test(line);
+}
+
 // ─── Motor de análisis ───────────────────────────────────────────────────────
 
 function analyzeModule(
@@ -698,7 +783,11 @@ function buildFinding(
     cweId: def.cweId,
     file: where?.file,
     line: where?.line,
-    advisory: def.advisory ? true : undefined,
+    advisory:
+      def.advisory === true ||
+      (def.advisoryWhen ? def.advisoryWhen({ line: where?.text || match[0], file: where?.file || '', match: match[0] }) : false)
+        ? true
+        : undefined,
     source: 'regex' as const,
   };
 }

@@ -202,17 +202,32 @@ export interface FileSpan {
 }
 
 /**
- * Localiza un offset del contenido del modulo: devuelve archivo y linea real.
- * Devuelve null si el offset cae fuera de todo span (no deberia pasar).
+ * Localiza un offset del contenido del modulo: devuelve archivo, linea real y
+ * el texto de esa linea, que hace falta para decidir si un hallazgo es real o
+ * solo un consejo (un `Password: "Contraseña"` en un diccionario i18n y una
+ * credencial de verdad se detectan con el mismo regex).
+ *
+ * Devuelve null si el offset cae fuera de todo span.
  */
-export function locate(module: FileModule, offset: number): { file: string; line: number } | null {
+export function locate(
+  module: FileModule,
+  offset: number
+): { file: string; line: number; text: string } | null {
   if (module.spans.length === 0) return null;
 
-  const line = module.content.slice(0, offset).split('\n').length;
+  const before = module.content.slice(0, offset);
+  const line = before.split('\n').length;
   const span = module.spans.find((s) => line >= s.startLine && line <= s.endLine);
   if (!span) return null;
 
-  return { file: span.path, line: line - span.startLine + 1 };
+  // La línea COMPLETA, no la que empieza en el match: las palabras que deciden
+  // si el hallazgo es real ("token", "password") suelen estar ANTES de donde
+  // casó el regex.
+  const lineStart = before.lastIndexOf('\n') + 1;
+  const lineEnd = module.content.indexOf('\n', offset);
+  const text = module.content.slice(lineStart, lineEnd === -1 ? undefined : lineEnd).trim();
+
+  return { file: span.path, line: line - span.startLine + 1, text };
 }
 
 /**
