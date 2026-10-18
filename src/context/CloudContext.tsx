@@ -12,6 +12,7 @@ import {
   toOriginJson,
   toProjectAnalysis,
   toProjectAnalysisInsert,
+  toProjectAnalysisUpdate,
   toProposal,
   toProposalInsert,
   toUserOrigin,
@@ -26,6 +27,7 @@ import {
   getAwsServices,
   getAwsIpRanges,
   analyzeProject,
+  reviewWithAi,
   type AwsHealthAlert,
   type AwsHealthService,
   type AwsServiceEntry,
@@ -105,12 +107,20 @@ interface CloudContextType {
   // AI Project Analysis
   projectAnalysis: ProjectAnalysisResult | null;
   isAnalyzing: boolean;
+  /** La revisión con Gemini está enriching un análisis ya válido. */
+  isAiReviewing: boolean;
   analyzeError: string | null;
   runProjectAnalysis: (
     projectName: string,
     code: string,
     description: string,
-    language?: string
+    language?: string,
+    /**
+     * Segunda fase: revisar el proyecto con Gemini y fusionar sus hallazgos.
+     * Es opcional a proposito, porque cada analisis gasta requests del limite
+     * diario gratuito y no todo el mundo quiere pagar esa cuota en cada prueba.
+     */
+    useAi?: boolean
   ) => Promise<void>;
   clearProjectAnalysis: () => void;
   importAnalysisRecommendations: () => void;
@@ -246,6 +256,12 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     readJsonCache<ProjectAnalysisResult | null>(LOCAL_STORAGE_ANALYSIS_KEY, null)
   );
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  /**
+   * Segunda fase en curso. Se separa de `isAnalyzing` porque el análisis
+   * estático ya está en pantalla y es válido: lo que se está haciendo es
+   * enricherlo, así que la interfaz debe poder distinguir ambas fases.
+   */
+  const [isAiReviewing, setIsAiReviewing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
   // Persistence state
@@ -727,23 +743,33 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // ─── AI Project Analysis ────────────────────────────────────────────────────
 
   const runProjectAnalysis = useCallback(
-    async (projectName: string, code: string, description: string, language?: string) => {
+    async (
+      projectName: string,
+      code: string,
+      description: string,
+      language?: string,
+      useAi = false
+    ) => {
       setIsAnalyzing(true);
       setAnalyzeError(null);
       try {
-        const result = await analyzeProject({
+        const payload = {
           projectName,
           code,
           description,
           language,
           region: selectedRegionCode,
-        });
+        };
+
+        const result = await analyzeProject(payload);
         // El analizador devuelve `analysis-${Date.now()}`, que no es un UUID.
-        const persisted: ProjectAnalysisResult = { ...result, id: newId() };
+        let persisted: ProjectAnalysisResult = { ...result, id: newId() };
         setProjectAnalysis(persisted);
 
         const uid = userIdRef.current;
-        if (isRemoteRef.current && uid) {
+        const isRemote = Boolean(isRemoteRef.current && uid);
+
+        if (isRemote && uid) {
           const { error } = await supabase
             .from('project_analyses')
             .insert(toProjectAnalysisInsert(persisted, uid));
@@ -757,6 +783,53 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           `Análisis completado: ${persisted.overallSecurityScore}/100 de seguridad — ${persisted.totalFindings} hallazgos.`,
           'Analizador IA'
         );
+
+        // ─── Fase 2: revisión con IA ────────────────────────────────────────
+        // Va después de avisar del resultado del regex, y en su propio
+        // try/catch. Puede tardar hasta un minuto, así que el usuario ya tiene
+        // el análisis estático en pantalla mientras tanto. Si la IA falla, se
+        // conserva intacto lo anterior: nunca debe convertir un análisis
+        // correcto en un error a pantalla completa.
+        if (useAi) {
+          setIsAiReviewing(true);
+          try {
+            const review = await reviewWithAi(payload);
+
+            if (review.result) {
+              persisted = { ...review.result, id: persisted.id };
+              setProjectAnalysis(persisted);
+
+              if (isRemote) {
+                const { error } = await supabase
+                  .from('project_analyses')
+                  .update(toProjectAnalysisUpdate(persisted))
+                  .eq('id', persisted.id);
+                if (error) {
+                  showToast('warning', `No se pudo actualizar el análisis con la IA: ${error.message}`, 'Analizador IA');
+                }
+              }
+
+              showToast(
+                review.aiFindingCount > 0 ? 'info' : 'success',
+                `Revisión con IA completada: ${review.aiFindingCount} hallazgos añadidos con ${review.aiModel}. Nuevo puntaje ${persisted.overallSecurityScore}/100.`,
+                'Analizador IA'
+              );
+            }
+
+            // Aviso parcial (límite diario, módulo caído, sin tiempo): el
+            // resultado ya mostrado es valido, solo falta explicación.
+            if (review.aiError) {
+              showToast('warning', review.aiError, 'Analizador IA');
+            }
+          } catch (err: unknown) {
+            const message =
+              err instanceof Error ? err.message : 'Error desconocido en la revisión con IA.';
+            // Sin `setAnalyzeError`: el análisis estático sigue siendo válido.
+            showToast('warning', `La revisión con IA no pudo completarse: ${message}`, 'Analizador IA');
+          } finally {
+            setIsAiReviewing(false);
+          }
+        }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'Error desconocido al analizar el proyecto.';
         setAnalyzeError(message);
@@ -927,7 +1000,8 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         awsPriceSource,
         // AI Analysis
         projectAnalysis,
-        isAnalyzing,
+isAnalyzing,
+    isAiReviewing,
         analyzeError,
         runProjectAnalysis,
         clearProjectAnalysis,

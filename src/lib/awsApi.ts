@@ -168,3 +168,35 @@ export async function analyzeProject(payload: AiAnalyzeRequest) {
   }
   return parseJsonOrThrow<ProjectAnalysisResult>(response, '/api/ai-analyze');
 }
+
+export interface AiReviewResponse {
+  aiEnabled: boolean;
+  aiModel: string;
+  aiFindingCount: number;
+  aiError?: string;
+  /**
+   * El analisis ya combinado (regex + IA). Viene ausente cuando la revision no
+   * llego a hacer nada: sin GEMINI_API_KEY el endpoint responde de inmediato
+   * para no gastar, y entonces el cliente debe conservar su resultado estatico.
+   */
+  result?: ProjectAnalysisResult;
+}
+
+/**
+ * Segunda capa del analizador: revisa el mismo proyecto con Gemini y fusiona sus
+ * hallazgos con los del regex. Es un endpoint aparte y mas lento (hasta 60s,
+ * una llamada por modulo), asi que el timeout del cliente va holgado.
+ */
+export async function reviewWithAi(payload: AiAnalyzeRequest): Promise<AiReviewResponse> {
+  const response = await fetch('/api/ai-review', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(90000),
+  });
+  if (!response.ok) {
+    const err = await response.text().catch(() => `HTTP ${response.status}`);
+    throw new Error(err || `HTTP ${response.status}`);
+  }
+  return parseJsonOrThrow<AiReviewResponse>(response, '/api/ai-review');
+}

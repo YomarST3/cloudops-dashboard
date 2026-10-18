@@ -411,7 +411,9 @@ export async function generateAnalysisReportPdf(
       return [
         { content: SEVERITY[f.severity].label, styles: { textColor: tint, fontStyle: 'bold' } },
         f.category,
-        f.title,
+        // El sufijo deja claro en el PDF que capa detecto el hallazgo, igual
+        // que hace la etiqueta "IA" en la pantalla.
+        f.source === 'ai' ? `${f.title}  [IA]` : f.title,
         f.affectedModule,
         f.lineHint ?? '-',
         f.cweId ?? '-',
@@ -512,7 +514,15 @@ export async function generateAnalysisReportPdf(
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(7.4);
     doc.setTextColor(...MUTED);
-    doc.text(ellipsize(pdf, `${severity.label}  ·  ${f.category}  ·  ${meta}`, FINDING_W), FINDING_INDENT, cursor);
+    doc.text(
+      ellipsize(
+        pdf,
+        `${severity.label}  ·  ${f.category}${f.source === 'ai' ? '  ·  IA' : ''}  ·  ${meta}`,
+        FINDING_W
+      ),
+      FINDING_INDENT,
+      cursor
+    );
     cursor += metaH + gap;
 
     doc.setFontSize(8.4);

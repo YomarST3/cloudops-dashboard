@@ -128,5 +128,18 @@ export const toProjectAnalysisInsert = (
   payload: result as unknown as Database['public']['Tables']['project_analyses']['Insert']['payload'],
 });
 
+/**
+ * Actualiza la fila ya insertada cuando la segunda fase (Gemini) cambia el
+ * resultado. No lleva `id` ni `user_id`: la fila se localiza por su `id`, que el
+ * analisis guarda como clave primaria. Insertar de nuevo crearia un segundo
+ * registro del mismo analisis en vez de corregir el primero.
+ */
+export const toProjectAnalysisUpdate = (result: ProjectAnalysisResult) => ({
+  analyzed_at: result.analyzedAt,
+  overall_security_score: result.overallSecurityScore,
+  total_findings: result.totalFindings,
+  payload: result as unknown as Database['public']['Tables']['project_analyses']['Insert']['payload'],
+});
+
 export const toOriginJson = (origin: UserOrigin | null) =>
   (origin ?? null) as unknown as Database['public']['Tables']['user_preferences']['Insert']['origin'];

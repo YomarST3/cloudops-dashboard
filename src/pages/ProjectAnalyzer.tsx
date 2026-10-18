@@ -323,6 +323,14 @@ const FindingCard: React.FC<{ finding: SecurityFinding }> = ({ finding }) => {
               {cfg.label}
             </span>
             <span className="text-xs text-slate-500 dark:text-slate-400">{finding.category}</span>
+            {finding.source === 'ai' && (
+              <span
+                title="Detectado por la revisión con IA (Gemini), no por los patrones estáticos"
+                className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-violet-100 dark:bg-violet-950 text-violet-700 dark:text-violet-300"
+              >
+                IA
+              </span>
+            )}
             {finding.cweId && (
               <span className="text-[10px] font-mono text-slate-400">{finding.cweId}</span>
             )}
@@ -522,6 +530,7 @@ export const ProjectAnalyzer: React.FC = () => {
   const {
     projectAnalysis,
     isAnalyzing,
+  isAiReviewing,
     analyzeError,
     runProjectAnalysis,
     clearProjectAnalysis,
@@ -548,6 +557,12 @@ export const ProjectAnalyzer: React.FC = () => {
   const [dragOver, setDragOver] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'findings' | 'modules' | 'recommendations' | 'costs'>('findings');
+  /**
+   * Segunda capa del análisis. Apagada por defecto a propósito: cada análisis
+   * con IA consume requests del límite diario gratuito, y para pruebas
+   * repetidas conviene poder quedarse solo con los patrones estáticos.
+   */
+  const [useAiReview, setUseAiReview] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -671,7 +686,7 @@ export const ProjectAnalyzer: React.FC = () => {
       finalCode = code.trim();
     }
 
-    await runProjectAnalysis(projectName.trim(), finalCode, description.trim(), lang);
+    await runProjectAnalysis(projectName.trim(), finalCode, description.trim(), lang, useAiReview);
     setActiveTab('findings');
   };
 
@@ -1059,6 +1074,24 @@ export const ProjectAnalyzer: React.FC = () => {
             </div>
           )}
 
+          <label className="flex items-start gap-3 p-3 rounded-xl border border-violet-200 dark:border-violet-900/60 bg-violet-50/60 dark:bg-violet-950/20 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={useAiReview}
+              onChange={(e) => setUseAiReview(e.target.checked)}
+              disabled={isAnalyzing}
+              className="mt-0.5 w-4 h-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500 disabled:opacity-50"
+            />
+            <span className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+              <strong className="block text-slate-800 dark:text-white font-semibold">
+                Revisar también con IA (Gemini)
+              </strong>
+              Los patrones estáticos ya se ejecutan siempre. Esta opción añade una segunda
+              revisión módulo a módulo con un modelo de IA, que detecta problemas más
+              sutiles. Tarda más y consume cuota del API, así que es opcional.
+            </span>
+          </label>
+
           <div className="flex items-center justify-between pt-2">
             <p className="text-xs text-slate-500 dark:text-slate-400">
               Región de despliegue: <strong className="text-slate-700 dark:text-slate-300">{currentRegion.name}</strong>
@@ -1069,7 +1102,9 @@ export const ProjectAnalyzer: React.FC = () => {
               className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-bold text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed shadow-md shadow-blue-500/20 transition-all"
             >
               {isAnalyzing ? (
-                <><RefreshCw className="w-4 h-4 animate-spin" />Analizando...</>
+                <><RefreshCw className="w-4 h-4 animate-spin" />
+                  {isAiReviewing ? 'Revisando con IA...' : 'Analizando...'}
+                </>
               ) : (
                 <><BrainCircuit className="w-4 h-4" />Analizar con IA</>
               )}
@@ -1111,6 +1146,26 @@ export const ProjectAnalyzer: React.FC = () => {
                 <h2 className="text-xl sm:text-2xl font-extrabold mb-2">{result.projectName}</h2>
                 <p className="text-sm text-slate-300 leading-relaxed">{result.summary}</p>
               </div>
+
+              {/* Estado de la segunda capa (IA). Distingue "no se pidió" de
+                  "se pidió y falló", que son cosas distintas para el usuario. */}
+              {result.aiEnabled && !result.aiError && (
+                <div className="flex items-center gap-3 p-3 rounded-xl bg-violet-500/10 border border-violet-400/30">
+                  <BrainCircuit className="w-4 h-4 text-violet-300 shrink-0" />
+                  <p className="text-xs text-violet-100 leading-relaxed">
+                    Revisado con <strong>{result.aiModel}</strong>: {result.aiFindingCount ?? 0}{' '}
+                    hallazgos aporta{result.aiFindingCount === 1 ? 'do' : 'dos'} por la IA, marcados con
+                    la etiqueta <span className="font-bold">IA</span>. El puntaje de arriba ya los
+                    incluye.
+                  </p>
+                </div>
+              )}
+              {result.aiError && (
+                <div className="flex items-center gap-3 p-3 rounded-xl bg-amber-500/10 border border-amber-400/30">
+                  <AlertTriangle className="w-4 h-4 text-amber-300 shrink-0" />
+                  <p className="text-xs text-amber-100 leading-relaxed">{result.aiError}</p>
+                </div>
+              )}
 
               {/* Severity counters */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">

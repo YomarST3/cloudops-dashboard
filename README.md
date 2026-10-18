@@ -222,6 +222,23 @@ cloudops-dashboard/
 
 Si no hay `.env`, el dashboard arranca igual en **modo local**: guarda todo en `localStorage` y lo muestra en el menú de usuario. Sirve para explorar la interfaz sin credenciales, pero nada se comparte entre dispositivos.
 
+### Configuración de la revisión con IA (opcional)
+
+El analizador de proyectos funciona sin esto. Para añadir la segunda capa con Gemini:
+
+1. Crea una clave en **[aistudio.google.com/apikey](https://aistudio.google.com/apikey)** (cuenta de Google, **sin tarjeta**).
+2. Copia la clave (empieza por `AIza`) en tu `.env`:
+   ```bash
+   GEMINI_API_KEY=AIza...
+   GEMINI_MODEL=gemini-3.5-flash-lite
+   ```
+3. En **Vercel**, añádela también en *Project Settings → Environment Variables* como variable **normal** (no le pongas el prefijo `VITE_`, o acabaría en el bundle del navegador y cualquiera podría verla).
+
+Después, marca la casilla **"Revisar también con IA"** en el analizador. Viene **desactivada** a propósito: cada análisis consume requests del límite diario gratuito.
+
+> [!TIP]
+> En local la clave se lee con `process.loadEnvFile()`, disponible en Node 20.12+, así que no hace falta ninguna dependencia extra. Si no hay `.env` (Vercel, Docker) se ignora sin error, porque ahí la variable ya viene en `process.env`.
+
 ### Despliegue en Vercel
 
 Añade `VITE_SUPABASE_URL` y `VITE_SUPABASE_PUBLISHABLE_KEY` en *Project Settings → Environment Variables*. Vite las incrusta en tiempo de build, así que hay que **re-desplegar** tras cambiarlas. Las funciones de `api/` se despliegan automáticamente.
@@ -352,6 +369,16 @@ Las dos variables son **build args**, no variables de runtime: Vite las incrusta
 * El último análisis se guarda en Supabase por usuario.
 * Botón **"Descargar PDF"** que genera el reporte del análisis y lo abre en una pestaña nueva: portada con metadatos, resumen ejecutivo, distribución por severidad, inventario de hallazgos, detalle por módulo con la recomendación de remediación de cada hallazgo, e infraestructura AWS recomendada con costos estimados. jsPDF se carga por `import()` dinámico, así que no engorda el bundle inicial.
 * **Precios consistentes en las tres superficies**: el analizador, el PDF y la calculadora de costos resuelven el importe de cada servicio con `src/lib/analysis-pricing.ts`. Si hay precio real de AWS (Price List API, para s3, cloudfront, route53, lambda, rds y ec2) ese gana; si no, se usa el estimado del analizador. Cada cifra se rotula como `AWS live` o `Estimado`, y el PDF declara la región de los precios.
+
+#### Segunda capa: revisión con IA (Gemini)
+
+* El análisis por patrones **sigue siendo la base y siempre se ejecuta**. Esta capa es opcional y aditiva: sin clave, sin cuota o si el modelo falla, el analizador funciona exactamente igual que antes.
+* Con `GEMINI_API_KEY` configurada, `api/ai-review.ts` revisa **el mismo proyecto módulo a módulo** con Gemini y fusiona los hallazgos con los del regex, marcados con una etiqueta **IA** (en pantalla y en el PDF, con el sufijo `[IA]`).
+* Hay **un solo puntaje**: al fusionar se recalculan el score de cada módulo, el global, el compliance y los contadores. Los hallazgos de la IA entran en ese cálculo igual que los regex.
+* Ambos endpoints usan el **mismo troceado de módulos** (`api/_modules.ts`) y la **misma fórmula de puntaje** (`api/_analyze.ts`). Sin eso, los hallazgos de la IA acabarían adjudicados a carpetas distintas de las que usa el regex.
+* Van en endpoints separados por un motivo concreto: una función serverless de Vercel dura 60 s y aquí se hacen hasta 15 llamadas al modelo (una por módulo). Si compartieran endpoint, al agotarse el tiempo se perdería también el análisis estático.
+* Es **gratis**: `gemini-3.5-flash-lite` da 500 requests/día en el plan gratuito, y el máximo por análisis son 15 (uno por módulo). `GEMINI_MODEL` permite cambiar a `gemini-3.8-flash` (más preciso, 20/día) sin tocar código. No se instala ningún SDK: se usa `fetch` nativo.
+* A tener en cuenta: en el plan gratuito **Google usa el código enviado para entrenar sus modelos**. Para proyectos propios o de clase no hay problema, pero con código de cliente real conviene revisar esta política.
 
 ### Acceso (`/login`)
 * Registro e inicio de sesión con email y contraseña gestionados por Supabase Auth.

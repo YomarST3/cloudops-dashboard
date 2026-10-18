@@ -348,7 +348,7 @@ function parseFiles(code: string): SourceFile[] {
   return files.filter((f) => f.content.trim().length > 0);
 }
 
-const MAX_MODULES = 15;
+const MAX_MODULES = 20;
 
 interface FileModule {
   name: string;

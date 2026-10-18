@@ -1,0 +1,767 @@
+/**
+ * api/_analyze.ts
+ *
+ * Motor del analisis estatico (regex). No es un endpoint: son funciones puras
+ * que usan tanto /api/ai-analyze como /api/ai-review.
+ *
+ * /api/ai-review lo necesita porque, al sumar los hallazgos de Gemini, debe
+ * RECALCULAR el puntaje con la misma formula. Si el calculo viviera dentro del
+ * handler de ai-analyze, la IA no se podria fusionar sin duplicar la logica y
+ * el resultado puntuaria distinto segun quien lo recomponga.
+ */
+
+import type {
+  ModuleAnalysis,
+  ProjectAnalysisResult,
+  SecurityFinding,
+  SecurityFindingSeverity,
+} from '../../types/cloud';
+
+import {
+  buildFolderModules,
+  buildSingleModule,
+  parseFiles,
+  type FileModule,
+} from './modules.ts';
+
+// ─── Formula de puntaje ──────────────────────────────────────────────────────
+//
+// Vive aqui y no dentro de un handler porque la usan los dos endpoints: el
+// analisis estatico al puntuar cada modulo, y la revision con IA al recalcular
+// ese mismo puntaje tras anadir sus hallazgos. Una sola formula, un solo
+// resultado, sea cual sea quien anada hallazgos.
+
+const PENALTIES: Record<SecurityFindingSeverity, number> = {
+  critical: 25,
+  high: 15,
+  medium: 8,
+  low: 3,
+  info: 1,
+};
+
+/** Arranca en 100 y descuenta por severidad, sin bajar de 0. */
+function scoreOf(findings: SecurityFinding[]): number {
+  const penalty = findings.reduce((acc, f) => acc + (PENALTIES[f.severity] ?? 0), 0);
+  return Math.max(0, 100 - penalty);
+}
+
+function statusOf(findings: SecurityFinding[]): ModuleAnalysis['status'] {
+  return findings.some((f) => f.severity === 'critical')
+    ? 'critical'
+    : findings.some((f) => f.severity === 'high')
+      ? 'warning'
+      : 'secure';
+}
+
+interface FindingDef {
+  id: string;
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
+  category: string;
+  title: string;
+  description: string;
+  recommendation: string;
+  cweId?: string;
+  pattern: RegExp;
+  affectedModule: (match: string) => string;
+  lineHint?: (match: RegExpExecArray) => string;
+}
+
+// ─── Patrones de análisis de seguridad ───────────────────────────────────────
+
+const SECURITY_PATTERNS: FindingDef[] = [
+  {
+    id: 'sql-injection',
+    severity: 'critical',
+    category: 'Injection',
+    title: 'Posible Inyección SQL',
+    description: 'Se detecta concatenación directa de entrada del usuario en consultas SQL, lo que puede permitir a un atacante manipular la base de datos.',
+    recommendation: 'Usar consultas parametrizadas (prepared statements) o un ORM que las maneje automáticamente. Nunca concatenar strings en consultas SQL.',
+    cweId: 'CWE-89',
+    pattern: /(?:query|execute|sql|db\.run|connection\.query)\s*\(\s*[`"'].*?\+|\$\{.*?\}.*?(?:SELECT|INSERT|UPDATE|DELETE|DROP|WHERE)/i,
+    affectedModule: () => 'Base de Datos / DAL',
+    lineHint: (m) => `Línea cerca de: "${m[0].substring(0, 60)}..."`,
+  },
+  {
+    id: 'hardcoded-secret',
+    severity: 'critical',
+    category: 'Secrets Management',
+    title: 'Credenciales Hardcodeadas',
+    description: 'Se encontraron contraseñas, tokens o claves de API escritas directamente en el código fuente.',
+    recommendation: 'Mover todas las credenciales a variables de entorno (.env) y usar AWS Secrets Manager o AWS Systems Manager Parameter Store para producción.',
+    cweId: 'CWE-798',
+    pattern: /(?:password|passwd|secret|api_?key|apikey|token|auth_?token|private_?key)\s*[:=]\s*["'][^"']{6,}/i,
+    affectedModule: () => 'Configuración / Autenticación',
+    lineHint: (m) => `Secreto detectado: "${m[0].substring(0, 50).replace(/(["'][^"']{3})[^"']*(["'])/g, '$1***$2')}..."`,
+  },
+  {
+    id: 'xss-vulnerability',
+    severity: 'high',
+    category: 'XSS',
+    title: 'Riesgo de Cross-Site Scripting (XSS)',
+    description: 'El código inserta contenido HTML sin sanitizar, lo que permite a un atacante inyectar scripts maliciosos.',
+    recommendation: 'Sanitizar toda entrada del usuario antes de renderizar en HTML. Usar DOMPurify, evitar innerHTML con datos externos y aplicar Content Security Policy (CSP).',
+    cweId: 'CWE-79',
+    pattern: /(?:innerHTML|document\.write|\.html\()\s*[^;]*(?:\+|`|\$\{)/i,
+    affectedModule: () => 'Frontend / Vista',
+    lineHint: () => 'Uso de innerHTML con contenido dinámico',
+  },
+  {
+    id: 'weak-crypto',
+    severity: 'high',
+    category: 'Cryptography',
+    title: 'Algoritmo Criptográfico Débil',
+    description: 'Se detecta uso de MD5 o SHA-1, que son algoritmos obsoletos y vulnerables a colisiones.',
+    recommendation: 'Migrar a SHA-256 o SHA-3 para hashing. Para contraseñas usar bcrypt, argon2 o PBKDF2 con al menos 10 rondas.',
+    cweId: 'CWE-327',
+    pattern: /(?:md5|sha1|createHash\(['"]md5['"]|createHash\(['"]sha1['"])/i,
+    affectedModule: () => 'Seguridad / Criptografía',
+  },
+  {
+    id: 'insecure-random',
+    severity: 'medium',
+    category: 'Cryptography',
+    title: 'Generación de Números Aleatorios Inseguros',
+    description: 'Math.random() no es criptográficamente seguro. Usar para tokens, sesiones o IDs puede ser predecible.',
+    recommendation: 'Usar crypto.randomUUID(), crypto.randomBytes() (Node.js) o window.crypto.getRandomValues() para valores de seguridad.',
+    cweId: 'CWE-338',
+    pattern: /Math\.random\(\)/,
+    affectedModule: () => 'Seguridad / Tokens',
+  },
+  {
+    id: 'cors-wildcard',
+    severity: 'high',
+    category: 'Access Control',
+    title: 'CORS con Comodín (*)',
+    description: 'La política CORS permite peticiones de cualquier origen, exponiendo la API a ataques cross-origin.',
+    recommendation: 'Definir explícitamente los orígenes permitidos en lugar de usar *. En AWS, configurar CORS específico en API Gateway o CloudFront.',
+    cweId: 'CWE-942',
+    pattern: /Access-Control-Allow-Origin['":\s]+\*|cors\(\s*\)/,
+    affectedModule: () => 'API / CORS',
+  },
+  {
+    id: 'no-auth-check',
+    severity: 'high',
+    category: 'Authentication',
+    title: 'Endpoint sin Verificación de Autenticación',
+    description: 'Se detectan rutas de API sin middleware de autenticación, que podrían exponer datos sensibles.',
+    recommendation: 'Implementar middleware de autenticación JWT o Cognito antes de cada endpoint protegido. Usar AWS API Gateway con authorizers.',
+    cweId: 'CWE-306',
+    pattern: /(?:app\.(?:get|post|put|delete|patch)|router\.(?:get|post|put|delete|patch))\s*\([^)]+\)\s*(?:\n|.){0,30}(?:req\s*,\s*res)/,
+    affectedModule: () => 'API / Controladores',
+  },
+  {
+    id: 'console-log-sensitive',
+    severity: 'medium',
+    category: 'Information Disclosure',
+    title: 'Logs con Datos Sensibles',
+    description: 'Se registran contraseñas, tokens o información personal en console.log, lo que puede exponer datos en logs de producción.',
+    recommendation: 'Eliminar todos los console.log en producción. Usar un sistema de logging estructurado (Winston, Pino) con AWS CloudWatch Logs y redactar campos sensibles.',
+    cweId: 'CWE-532',
+    pattern: /console\.(?:log|error|warn|info)\s*\([^)]*(?:password|token|secret|key|auth|credit|ssn|email|user)/i,
+    affectedModule: () => 'Logging / Diagnósticos',
+  },
+  {
+    id: 'prototype-pollution',
+    severity: 'high',
+    category: 'Injection',
+    title: 'Posible Contaminación de Prototipo',
+    description: 'El uso de Object.assign o spread con datos no validados puede llevar a prototype pollution en JavaScript.',
+    recommendation: 'Validar y sanitizar los datos de entrada antes de asignar a objetos. Usar Object.create(null) para objetos de configuración críticos.',
+    cweId: 'CWE-1321',
+    pattern: /Object\.assign\s*\(\s*(?:req\.body|JSON\.parse)/,
+    affectedModule: () => 'API / Validación',
+  },
+  {
+    id: 'open-redirect',
+    severity: 'medium',
+    category: 'Redirect',
+    title: 'Redirección Abierta',
+    description: 'Se detecta redirección usando parámetros del usuario sin validación, que puede ser explotada para phishing.',
+    recommendation: 'Validar las URLs de redirección contra una lista blanca de dominios permitidos.',
+    cweId: 'CWE-601',
+    pattern: /res\.redirect\s*\(\s*req\.(?:query|body|params)/,
+    affectedModule: () => 'API / Rutas',
+  },
+  {
+    id: 'no-rate-limit',
+    severity: 'medium',
+    category: 'Denial of Service',
+    title: 'Sin Rate Limiting',
+    description: 'La API no implementa límites de tasa, lo que la hace vulnerable a ataques de fuerza bruta y DDoS.',
+    recommendation: 'Implementar rate limiting con express-rate-limit o similar. En AWS, usar API Gateway throttling y AWS WAF.',
+    cweId: 'CWE-770',
+    pattern: /(?:express|app)\s*=\s*(?:express|require\(['"]express['"])\s*\(\s*\)(?:(?!\brateLimit\b).)*$/s,
+    affectedModule: () => 'API / Seguridad',
+  },
+  {
+    id: 'insecure-deserialization',
+    severity: 'high',
+    category: 'Deserialization',
+    title: 'Deserialización Insegura',
+    description: 'eval() o Function() con datos externos puede ejecutar código arbitrario del atacante.',
+    recommendation: 'Nunca usar eval() con datos del usuario. Usar JSON.parse() con validación de esquema.',
+    cweId: 'CWE-502',
+    pattern: /eval\s*\(\s*(?:req\.|JSON|data|input|body)/,
+    affectedModule: () => 'Procesamiento de Datos',
+  },
+  {
+    id: 'missing-https',
+    severity: 'medium',
+    category: 'Transport Security',
+    title: 'URLs HTTP sin Cifrar',
+    description: 'Se usan URLs HTTP en lugar de HTTPS para comunicaciones internas o externas.',
+    recommendation: 'Forzar HTTPS en todas las comunicaciones. Configurar HSTS y usar AWS ACM para certificados TLS.',
+    cweId: 'CWE-319',
+    pattern: /(?:fetch|axios|http\.get|request)\s*\(\s*['"]http:\/\/(?!localhost)/,
+    affectedModule: () => 'Comunicaciones / HTTP Client',
+  },
+  {
+    id: 'env-not-validated',
+    severity: 'low',
+    category: 'Configuration',
+    title: 'Variables de Entorno sin Validación',
+    description: 'Se accede a process.env sin verificar que los valores existan, lo que puede causar fallos silenciosos en producción.',
+    recommendation: 'Validar las variables de entorno al inicio de la aplicación usando zod, joi o envalid. Documentar todas las variables requeridas.',
+    cweId: 'CWE-20',
+    pattern: /process\.env\.\w+(?!\s*\?\?|\s*\|\||\s*\!)/,
+    affectedModule: () => 'Configuración',
+  },
+  {
+    id: 'dependency-vulnerable',
+    severity: 'info',
+    category: 'Dependencies',
+    title: 'Gestión de Dependencias',
+    description: 'Se detectan imports de paquetes. Sin información del lockfile no es posible verificar si existen CVEs activos.',
+    recommendation: 'Ejecutar npm audit o snyk test regularmente. Activar Dependabot en GitHub para actualizaciones automáticas de seguridad.',
+    cweId: 'CWE-1104',
+    pattern: /require\s*\(['"](?!\.\/|\.\.\/)[a-z@]/,
+    affectedModule: () => 'Dependencias',
+  },
+];
+
+// ─── Motor de análisis ───────────────────────────────────────────────────────
+
+function analyzeModule(
+  module: FileModule,
+  idPrefix: string,
+  languageOverride?: string
+): {
+  moduleName: string;
+  language: string;
+  framework?: string;
+  fileCount: number;
+  linesAnalyzed: number;
+  securityScore: number;
+  findings: ReturnType<typeof buildFinding>[];
+  status: 'secure' | 'warning' | 'critical';
+} {
+  const content = module.content;
+  const findings: ReturnType<typeof buildFinding>[] = [];
+
+  for (const def of SECURITY_PATTERNS) {
+    const match = def.pattern.exec(content);
+    if (match) {
+      findings.push(buildFinding(def, match, `${idPrefix}-${def.id}`));
+    }
+  }
+
+  // Score y estado: los calcula scoreOf/statusOf, la MISMA formula que aplica
+  // la revision con IA al fusionar sus hallazgos.
+  const rawScore = scoreOf(findings);
+  const linesAnalyzed = content.split('\n').filter((l) => l.trim().length > 0).length;
+
+  const status = statusOf(findings);
+
+  return {
+    moduleName: module.name,
+    language: languageOverride || module.language,
+    framework: module.framework,
+    fileCount: module.fileCount,
+    linesAnalyzed,
+    securityScore: rawScore,
+    findings,
+    status,
+  };
+}
+
+function buildFinding(
+  def: FindingDef,
+  match: RegExpExecArray,
+  id: string
+) {
+  return {
+    id,
+    severity: def.severity,
+    category: def.category,
+    title: def.title,
+    description: def.description,
+    affectedModule: def.affectedModule(match[0]),
+    lineHint: def.lineHint ? def.lineHint(match) : undefined,
+    recommendation: def.recommendation,
+    cweId: def.cweId,
+  };
+}
+
+// ─── Recomendaciones de arquitectura AWS ─────────────────────────────────────
+
+interface ServiceRec {
+  serviceId: string;
+  serviceName: string;
+  awsService: string;
+  reason: string;
+  estimatedMonthlyCost: number;
+  priority: 'required' | 'recommended' | 'optional';
+  category: string;
+}
+
+function buildAwsRecommendations(
+  code: string,
+  description: string,
+  findings: Array<{ severity: string; category: string }>
+): ServiceRec[] {
+  const recs: ServiceRec[] = [];
+
+  const hasAuth = /auth|login|jwt|session|oauth/i.test(code + description);
+  const hasDB = /database|sql|mongodb|postgres|mysql|dynamo/i.test(code + description);
+  const hasFiles = /upload|file|storage|bucket|image|video|blob/i.test(code + description);
+  const hasCdn = /static|asset|html|css|react|frontend|spa/i.test(code + description);
+  const hasApi = /api|rest|graphql|endpoint|route|express|flask|fastapi/i.test(code + description);
+  const hasQueue = /queue|async|event|kafka|rabbit|message|worker/i.test(code + description);
+  const hasCache = /cache|redis|memcache|session|fast/i.test(code + description);
+  const hasSecurityIssue = findings.some((f) => ['critical', 'high'].includes(f.severity));
+  const hasSecrets = findings.some((f) => f.category === 'Secrets Management');
+  const hasCors = findings.some((f) => f.category === 'Access Control');
+  const hasRateLimit = findings.some((f) => f.category === 'Denial of Service');
+
+  // EC2 / Lambda
+  if (hasApi || code.length > 100) {
+    const useLambda = !/monolith|full.?stack|django|rails|spring/i.test(code + description);
+    if (useLambda) {
+      recs.push({
+        serviceId: 'lambda',
+        serviceName: 'AWS Lambda',
+        awsService: 'Lambda',
+        reason: 'Ejecutar la lógica del backend sin gestionar servidores. Escala automáticamente y es costo-eficiente para APIs.',
+        estimatedMonthlyCost: 4.5,
+        priority: 'required',
+        category: 'Compute',
+      });
+    } else {
+      recs.push({
+        serviceId: 'ec2',
+        serviceName: 'Amazon EC2',
+        awsService: 'EC2',
+        reason: 'Servidor de aplicación para el backend. Recomendado para aplicaciones con estado o que requieren control del runtime.',
+        estimatedMonthlyCost: 60.0,
+        priority: 'required',
+        category: 'Compute',
+      });
+    }
+  }
+
+  // API Gateway
+  if (hasApi) {
+    recs.push({
+      serviceId: 'apigateway',
+      serviceName: 'Amazon API Gateway',
+      awsService: 'API Gateway',
+      reason: `Gateway para gestionar y asegurar los endpoints. ${hasCors ? 'Necesario para resolver el problema de CORS detectado.' : ''} ${hasRateLimit ? 'Incluye throttling nativo para rate limiting.' : ''}`.trim(),
+      estimatedMonthlyCost: 12.0,
+      priority: 'required',
+      category: 'Networking',
+    });
+  }
+
+  // RDS / DynamoDB
+  if (hasDB) {
+    const useDynamo = /dynamo|nosql|document|flexible/i.test(code + description);
+    if (useDynamo) {
+      recs.push({
+        serviceId: 'dynamodb',
+        serviceName: 'Amazon DynamoDB',
+        awsService: 'DynamoDB',
+        reason: 'Base de datos NoSQL serverless con escalabilidad automática. Ideal para datos estructurados con acceso de alta velocidad.',
+        estimatedMonthlyCost: 25.0,
+        priority: 'required',
+        category: 'Database',
+      });
+    } else {
+      recs.push({
+        serviceId: 'rds',
+        serviceName: 'Amazon RDS (PostgreSQL)',
+        awsService: 'RDS',
+        reason: 'Base de datos relacional administrada. AWS gestiona backups, parches y failover automático.',
+        estimatedMonthlyCost: 80.0,
+        priority: 'required',
+        category: 'Database',
+      });
+    }
+  }
+
+  // S3
+  if (hasFiles || hasCdn) {
+    recs.push({
+      serviceId: 's3',
+      serviceName: 'Amazon S3',
+      awsService: 'S3',
+      reason: 'Almacenamiento de archivos estáticos, assets, uploads y backups. Altamente disponible y bajo costo.',
+      estimatedMonthlyCost: 5.0,
+      priority: 'required',
+      category: 'Storage',
+    });
+  }
+
+  // CloudFront
+  if (hasCdn) {
+    recs.push({
+      serviceId: 'cloudfront',
+      serviceName: 'Amazon CloudFront',
+      awsService: 'CloudFront',
+      reason: 'CDN global para distribuir el frontend y reducir latencia. Integra WAF para protección adicional.',
+      estimatedMonthlyCost: 18.0,
+      priority: 'recommended',
+      category: 'Content Delivery',
+    });
+  }
+
+  // Cognito (si hay auth)
+  if (hasAuth) {
+    recs.push({
+      serviceId: 'cognito',
+      serviceName: 'Amazon Cognito',
+      awsService: 'Cognito',
+      reason: 'Gestión de identidades y autenticación segura (OAuth 2.0, MFA, JWT). Reemplaza la autenticación manual detectada.',
+      estimatedMonthlyCost: 10.0,
+      priority: 'recommended',
+      category: 'Security',
+    });
+  }
+
+  // Secrets Manager (si hay secrets hardcodeados)
+  if (hasSecrets || hasSecurityIssue) {
+    recs.push({
+      serviceId: 'secretsmanager',
+      serviceName: 'AWS Secrets Manager',
+      awsService: 'Secrets Manager',
+      reason: 'Almacenar credenciales detectadas en el código de forma segura. Rotación automática de secretos.',
+      estimatedMonthlyCost: 2.5,
+      priority: 'required',
+      category: 'Security',
+    });
+  }
+
+  // WAF (si hay problemas de CORS o injection)
+  if (hasCors || findings.some((f) => f.category === 'Injection' || f.category === 'XSS')) {
+    recs.push({
+      serviceId: 'waf',
+      serviceName: 'AWS WAF',
+      awsService: 'WAF',
+      reason: 'Firewall de aplicaciones web. Filtra inyecciones SQL y XSS detectadas en el análisis de seguridad.',
+      estimatedMonthlyCost: 15.0,
+      priority: 'recommended',
+      category: 'Security',
+    });
+  }
+
+  // ElastiCache (si hay cache)
+  if (hasCache) {
+    recs.push({
+      serviceId: 'elasticache',
+      serviceName: 'Amazon ElastiCache (Redis)',
+      awsService: 'ElastiCache',
+      reason: 'Caché en memoria para reducir la carga en la base de datos y mejorar el rendimiento de la API.',
+      estimatedMonthlyCost: 35.0,
+      priority: 'recommended',
+      category: 'Database',
+    });
+  }
+
+  // SQS (si hay queues)
+  if (hasQueue) {
+    recs.push({
+      serviceId: 'sqs',
+      serviceName: 'Amazon SQS',
+      awsService: 'SQS',
+      reason: 'Cola de mensajes serverless para desacoplar componentes y procesar tareas asíncronas de forma confiable.',
+      estimatedMonthlyCost: 3.0,
+      priority: 'recommended',
+      category: 'Messaging',
+    });
+  }
+
+  // CloudWatch (siempre recomendado)
+  recs.push({
+    serviceId: 'cloudwatch',
+    serviceName: 'Amazon CloudWatch',
+    awsService: 'CloudWatch',
+    reason: 'Monitoreo de logs, métricas y alarmas. Esencial para observabilidad en producción y auditoría de seguridad.',
+    estimatedMonthlyCost: 8.0,
+    priority: 'recommended',
+    category: 'Monitoring',
+  });
+
+  // IAM (siempre requerido)
+  recs.push({
+    serviceId: 'iam',
+    serviceName: 'AWS IAM',
+    awsService: 'IAM',
+    reason: 'Control de acceso granular para todos los servicios AWS. Obligatorio para implementar el principio de menor privilegio.',
+    estimatedMonthlyCost: 0,
+    priority: 'required',
+    category: 'Security',
+  });
+
+  // VPC
+  recs.push({
+    serviceId: 'vpc',
+    serviceName: 'Amazon VPC',
+    awsService: 'VPC',
+    reason: 'Red privada virtual para aislar los recursos del proyecto. Subredes privadas para base de datos y backend.',
+    estimatedMonthlyCost: 0,
+    priority: 'required',
+    category: 'Networking',
+  });
+
+  return recs;
+}
+
+// ─── Análisis completo ───────────────────────────────────────────────────────
+
+export interface AnalyzeInput {
+  projectName?: string;
+  code?: string;
+  description?: string;
+  language?: string;
+  /**
+   * Se acepta y se documenta, pero las recomendaciones de servicios no dependen
+   * de la region: los precios reales los resuelve el dashboard con la Price List
+   * API (ver src/lib/analysis-pricing.ts).
+   */
+  region?: string;
+}
+
+function buildSummary(overallScore: number, critical: number, high: number, total: number): string {
+  return overallScore >= 85
+    ? `El proyecto tiene una postura de seguridad buena (${overallScore}/100). Se detectaron ${total} observaciones menores que conviene resolver antes del despliegue.`
+    : overallScore >= 60
+      ? `El proyecto requiere atención en seguridad (${overallScore}/100). Se identificaron ${critical + high} hallazgos críticos/altos que deben corregirse obligatoriamente antes de subir a producción.`
+      : `El proyecto presenta vulnerabilidades serias (${overallScore}/100). Con ${critical} hallazgos críticos y ${high} altos, el código NO debe desplegarse sin corregir los problemas identificados.`;
+}
+
+/**
+ * Normaliza la entrada y decide que se analiza.
+ *
+ * La exporta /api/ai-review porque Gemini necesita el CONTENIDO de cada modulo,
+ * y ese contenido no viaja en la respuesta del analisis (seria duplicar el
+ * codigo entero del proyecto otra vez por la red). Al pasar los dos endpoints
+ * por aqui, los limites de modulo no pueden divergir entre si: si divergieran,
+ * los hallazgos de la IA quedarian adjudicados a carpetas distintas de las que
+ * usa el regex.
+ */
+export interface PreparedAnalysis {
+  projectName: string;
+  description: string;
+  inputType: 'code' | 'description';
+  analysisTarget: string;
+  fileModules: FileModule[];
+  languageOverride?: string;
+}
+
+export function prepare(input: AnalyzeInput = {}): PreparedAnalysis {
+  const projectName = (input.projectName || 'Proyecto Sin Nombre').trim();
+  const code = (input.code || '').trim();
+  const description = (input.description || '').trim();
+  const inputType: 'code' | 'description' = code.length > 20 ? 'code' : 'description';
+
+  // Si solo hay descripción, fabricar un fragmento de código sintético para análisis
+  const analysisTarget =
+    inputType === 'code'
+      ? code
+      : `
+// Proyecto: ${projectName}
+// Descripción: ${description}
+const express = require('express');
+const app = express();
+app.get('/api/data', (req, res) => { res.json({ data: req.query.input }); });
+app.listen(3000);
+      `.trim();
+
+  const sourceFiles = parseFiles(analysisTarget);
+
+  return {
+    projectName,
+    description,
+    inputType,
+    analysisTarget,
+    fileModules:
+      sourceFiles.length > 0
+        ? buildFolderModules(sourceFiles)
+        : [buildSingleModule(analysisTarget, projectName)],
+    // `input.language` es el override manual del desplegable: si viene, manda sobre
+    // la extensión de los archivos.
+    languageOverride: input.language?.trim() || undefined,
+  };
+}
+
+/**
+ * Corre el analisis estatico completo. Es la funcion que /api/ai-analyze expone
+ * tal cual, y que /api/ai-review vuelve a ejecutar antes de sumar los hallazgos
+ * de Gemini, para partir del mismo resultado y recalcular sobre el.
+ */
+export function analyzeCode(input: AnalyzeInput = {}): ProjectAnalysisResult {
+  const { projectName, description, inputType, analysisTarget, fileModules, languageOverride } =
+    prepare(input);
+
+  const analyzedModules = fileModules.map((m, i) => analyzeModule(m, `mod${i}`, languageOverride));
+
+  const languages = Array.from(new Set(analyzedModules.map((m) => m.language)));
+  const frameworks = Array.from(
+    new Set(analyzedModules.map((m) => m.framework).filter((f): f is string => Boolean(f)))
+  );
+
+  // Deduplicar hallazgos por id global del proyecto
+  const allFindings = analyzedModules.flatMap((m) => m.findings);
+  const seenCategories = new Set<string>();
+  const dedupedFindings = allFindings.filter((f) => {
+    const key = f.id.replace(/^mod\d+-/, '');
+    if (seenCategories.has(key)) return false;
+    seenCategories.add(key);
+    return true;
+  });
+
+  // Score global: promedio ponderado de módulos (más líneas = más peso)
+  const totalLines = analyzedModules.reduce((a, m) => a + m.linesAnalyzed, 0) || 1;
+  const weightedScore =
+    analyzedModules.reduce((acc, m) => acc + m.securityScore * m.linesAnalyzed, 0) / totalLines;
+  const overallScore = Math.round(weightedScore);
+
+  // Compliance score (independiente, basado en categorías cubiertas)
+  const badCategories = new Set(dedupedFindings.map((f) => f.category));
+  const complianceScore = Math.max(30, Math.round(100 - badCategories.size * 10));
+
+  // Determinar tamaño de infraestructura según código/descripción
+  const linesOfCode = analysisTarget.split('\n').length;
+  const infrastructureSize = (linesOfCode < 100
+    ? 'small'
+    : linesOfCode < 500
+      ? 'medium'
+      : linesOfCode < 2000
+        ? 'large'
+        : 'enterprise') satisfies ProjectAnalysisResult['infrastructureSize'];
+
+  const recommendedServices = buildAwsRecommendations(analysisTarget, description, dedupedFindings);
+
+  const totalMonthly = recommendedServices.reduce((a, s) => a + s.estimatedMonthlyCost, 0);
+
+  const countBySeverity = (sev: SecurityFindingSeverity) =>
+    dedupedFindings.filter((f) => f.severity === sev).length;
+
+  const critical = countBySeverity('critical');
+  const high = countBySeverity('high');
+
+  return {
+    id: `analysis-${Date.now()}`,
+    projectName,
+    analyzedAt: new Date().toISOString(),
+    overallSecurityScore: overallScore,
+    totalFindings: dedupedFindings.length,
+    criticalFindings: critical,
+    highFindings: high,
+    mediumFindings: countBySeverity('medium'),
+    lowFindings: countBySeverity('low'),
+    modules: analyzedModules,
+    summary: buildSummary(overallScore, critical, high, dedupedFindings.length),
+    infrastructureSize,
+    recommendedServices,
+    estimatedTotalMonthlyCost: Math.round(totalMonthly * 100) / 100,
+    estimatedTotalAnnualCost: Math.round(totalMonthly * 12 * 100) / 100,
+    complianceScore,
+    inputType,
+    languages,
+    frameworks,
+  };
+}
+
+// ─── Fusión de hallazgos de IA ───────────────────────────────────────────────
+
+/**
+ * Anade los hallazgos de Gemini a un analisis ya calculado y RECALCULA todo lo
+ * que depende de ellos: score por modulo, estado, score global, compliance,
+ * contadores y resumen. Se recalcula porque el usuario quiere un unico
+ * puntaje que tenga en cuenta las dos capas, no dos puntajes distintos.
+ *
+ * DEDUPLICACION POR CWE
+ * Las dos capas detectan a veces lo mismo: el regex marca una inyeccion SQL y
+ * Gemini la vuelve a marcar con el mismo CWE. Si se sumaran ambas, el mismo
+ * fallo se penalizaria dos veces y el score se hundiria sin motivo (en una
+ * prueba real el score paso de 67 a 37 solo por eso).
+ *
+ * Por eso, antes de fusionar, se descarta el hallazgo de IA cuyo CWE ya
+ * aparezca entre los del regex **de ese mismo modulo**. El alcance es el
+ * modulo y no el proyecto entero a proposito: el mismo CWE en dos carpetas
+ * distintas son dos fallos distintos y ambos deben contar. Los hallazgos de IA
+ * sin CWE, o con un CWE que el regex no vio, se conservan siempre, que es
+ * justo el caso interesante (por ejemplo un IDOR).
+ *
+ * Los ids de los hallazgos de IA empiezan por `ai-mod...`, y la normalizacion
+ * de deduplicacion es `replace(/^mod\d+-/, '')`: ese prefijo no se quita, asi
+ * que cada hallazgo de IA conserva su clave propia y sobrevive al dedup. Los
+ * regex siguen deduplicandose entre si igual que hasta ahora.
+ */
+export function applyAiFindings(
+  base: ProjectAnalysisResult,
+  aiByModule: Record<string, SecurityFinding[]>
+): ProjectAnalysisResult {
+  const modules = base.modules.map((m) => {
+    const extra = aiByModule[m.moduleName] ?? [];
+    if (extra.length === 0) return m;
+
+    const regexCwes = new Set(
+      m.findings.map((f) => f.cweId).filter((c): c is string => Boolean(c))
+    );
+    const fresh = extra.filter((f) => !f.cweId || !regexCwes.has(f.cweId));
+    // Si todo lo que traia la IA ya estaba cubierto por el regex, el modulo se
+    // devuelve intacto: ni hallazgos nuevos ni recalculo de score.
+    if (fresh.length === 0) return m;
+
+    const findings = [...m.findings, ...fresh];
+    return { ...m, findings, securityScore: scoreOf(findings), status: statusOf(findings) };
+  });
+
+  const seen = new Set<string>();
+  const dedupedFindings = modules.flatMap((m) => m.findings).filter((f) => {
+    const key = f.id.replace(/^mod\d+-/, '');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  const totalLines = modules.reduce((a, m) => a + m.linesAnalyzed, 0) || 1;
+  const overallScore = Math.round(
+    modules.reduce((acc, m) => acc + m.securityScore * m.linesAnalyzed, 0) / totalLines
+  );
+
+  const complianceScore = Math.max(
+    30,
+    Math.round(100 - new Set(dedupedFindings.map((f) => f.category)).size * 10)
+  );
+
+  const countBySeverity = (sev: SecurityFindingSeverity) =>
+    dedupedFindings.filter((f) => f.severity === sev).length;
+
+  const critical = countBySeverity('critical');
+  const high = countBySeverity('high');
+
+  return {
+    ...base,
+    overallSecurityScore: overallScore,
+    totalFindings: dedupedFindings.length,
+    criticalFindings: critical,
+    highFindings: high,
+    mediumFindings: countBySeverity('medium'),
+    lowFindings: countBySeverity('low'),
+    complianceScore,
+    modules,
+    summary: buildSummary(overallScore, critical, high, dedupedFindings.length),
+  };
+}

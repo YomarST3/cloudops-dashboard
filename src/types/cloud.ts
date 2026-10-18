@@ -132,6 +132,12 @@ export interface SecurityFinding {
   lineHint?: string;
   recommendation: string;
   cweId?: string;
+  /**
+   * Que capa detecto el hallazgo: los regex de siempre (`ai-analyze`) o la
+   * revision con Gemini (`ai-review`). Opcional porque los analisis guardados
+   * antes de la IA no lo traen, y en la interfaz se tratan como `regex`.
+   */
+  source?: 'regex' | 'ai';
 }
 
 export interface ModuleAnalysis {
@@ -181,6 +187,18 @@ export interface ProjectAnalysisResult {
   /** Resumen deduplicado. Opcionales: los analisis anteriores no los traen. */
   languages?: string[];
   frameworks?: string[];
+  // ─── Revision con IA (Gemini) ────────────────────────────────────────────
+  // Opcionales por el mismo motivo: un analisis hecho solo con regex es valido
+  // y es lo que se obtiene cuando no hay GEMINI_API_KEY configurada.
+
+  /** Si el analisis llego a consultar a Gemini (no basta con tener la clave). */
+  aiEnabled?: boolean;
+  /** Modelo que respondio, para mostrarlo en la interfaz. */
+  aiModel?: string;
+  /** Cuantos de los hallazgos totales los aporto la IA. */
+  aiFindingCount?: number;
+  /** Por que no se pudo completar la revision, si fallo. La IA nunca es bloqueante. */
+  aiError?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
