@@ -1162,21 +1162,76 @@ export const ProjectAnalyzer: React.FC = () => {
                   que es lo que publican las herramientas de verdad y se puede
                   comprobar.
                 */}
-                <div className={`w-24 h-24 rounded-full bg-gradient-to-br ${scoreBg(100 - (result.coverage?.vulnerabilityFileRate ?? 0))} flex items-center justify-center shadow-lg`}>
-                  <span className="text-3xl font-extrabold text-white">
-                    {result.coverage ? `${result.coverage.vulnerabilityFileRate}%` : result.overallSecurityScore}
-                  </span>
-                </div>
-                <span className="text-xs font-bold mt-2 opacity-80 text-center leading-tight">
-                  {result.coverage
-                    ? 'de los archivos tiene\nuna vulnerabilidad'
-                    : scoreLabel(result.overallSecurityScore)}
-                </span>
-                {result.coverage && (
-                  <span className="text-[10px] opacity-60 mt-0.5">
-                    {result.coverage.filesWithVulnerabilities} de {result.coverage.filesAnalyzed} archivos
-                  </span>
-                )}
+                {/*
+                  El titular ya no es el indice 0-100. Ese numero solo decia
+                  "ninguno de mis 15 patrones disparo", y presentarlo como
+                  "seguridad" era una afirmacion que la herramienta no puede
+                  sostener. Ahora manda el porcentaje de archivos afectados.
+
+                  Tres casos, porque con una sola cifra el titular se
+                  contradecía: si hay hallazgos que el modelo no pudo localizar,
+                  decir "0%" mientras el total es 1 es sencillamente falso.
+                */}
+                {(() => {
+                  const c = result.coverage;
+                  const sinLocalizar = c?.unattributedFindings ?? 0;
+                  const hayVuln = result.totalFindings > 0;
+                  const localizables = c ? c.filesWithVulnerabilities > 0 : false;
+
+                  // Sin cobertura (analisis antiguo): se cae al indice.
+                  if (!c) {
+                    return (
+                      <>
+                        <div className={`w-24 h-24 rounded-full bg-gradient-to-br ${scoreBg(result.overallSecurityScore)} flex items-center justify-center shadow-lg`}>
+                          <span className="text-3xl font-extrabold text-white">{result.overallSecurityScore}</span>
+                        </div>
+                        <span className="text-xs font-bold mt-2 opacity-80">{scoreLabel(result.overallSecurityScore)}</span>
+                      </>
+                    );
+                  }
+
+                  if (!hayVuln) {
+                    return (
+                      <>
+                        <div className="w-24 h-24 rounded-full bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center shadow-lg">
+                          <ShieldCheck className="w-10 h-10 text-white" />
+                        </div>
+                        <span className="text-xs font-bold mt-2 opacity-80 text-center leading-tight">
+                          Sin vulnerabilidades
+                        </span>
+                        <span className="text-[10px] opacity-60 mt-0.5">{c.filesAnalyzed} archivos analizados</span>
+                      </>
+                    );
+                  }
+
+                  if (!localizables && sinLocalizar > 0) {
+                    return (
+                      <>
+                        <div className="w-24 h-24 rounded-full bg-gradient-to-br from-amber-500 to-amber-600 flex items-center justify-center shadow-lg">
+                          <span className="text-3xl font-extrabold text-white">{sinLocalizar}</span>
+                        </div>
+                        <span className="text-xs font-bold mt-2 opacity-80 text-center leading-tight">
+                          sin archivo localizable
+                        </span>
+                        <span className="text-[10px] opacity-60 mt-0.5">la IA no indicó dónde</span>
+                      </>
+                    );
+                  }
+
+                  return (
+                    <>
+                      <div className={`w-24 h-24 rounded-full bg-gradient-to-br ${scoreBg(100 - c.vulnerabilityFileRate)} flex items-center justify-center shadow-lg`}>
+                        <span className="text-3xl font-extrabold text-white">{c.vulnerabilityFileRate}%</span>
+                      </div>
+                      <span className="text-xs font-bold mt-2 opacity-80 text-center leading-tight">
+                        de los archivos tiene una vulnerabilidad
+                      </span>
+                      <span className="text-[10px] opacity-60 mt-0.5">
+                        {c.filesWithVulnerabilities} de {c.filesAnalyzed} archivos
+                      </span>
+                    </>
+                  );
+                })()}
               </div>
 
               <div className="flex-1">
@@ -1192,15 +1247,15 @@ export const ProjectAnalyzer: React.FC = () => {
                     {[
                       {
                         k: 'Archivos con alguna observación',
-                        v: `${result.coverage.fileIssueRate}% (${result.coverage.filesWithFindings}/${result.coverage.filesAnalyzed})`,
+                        v: `${result.coverage.filesWithFindings} de ${result.coverage.filesAnalyzed}`,
                       },
                       {
-                        k: 'Observaciones por 1.000 líneas',
+                        k: 'Observaciones por cada 1.000 líneas',
                         v: String(result.coverage.findingsPerThousandLines),
                       },
                       {
-                        k: 'Índice de riesgo ponderado',
-                        v: `${result.overallSecurityScore}/100`,
+                        k: 'Recomendaciones',
+                        v: `${result.advisoryCount ?? 0} (no penalizan)`,
                       },
                     ].map((s) => (
                       <span key={s.k} className="text-[11px]">
@@ -1211,14 +1266,13 @@ export const ProjectAnalyzer: React.FC = () => {
                   </div>
                 )}
 
-                {/* Alcance del análisis. Decirlo no resta credibilidad: al revés,
-                    es lo que distingue una herramienta honesta de una que vende
-                    humo. */}
+                {/* El alcance, en pequeño. Declarar cuantas reglas se aplicaron
+                    no resta credibilidad: es lo que permite contrastar el
+                    resultado en vez de aceptarlo a ciegas. */}
                 {result.coverage && (
-                  <p className="text-[11px] text-slate-400 mt-2 max-w-xl">
-                    Análisis basado en <strong className="text-slate-300">{result.coverage.rulesApplied} patrones</strong>
-                    {result.aiEnabled ? ' más una revisión con IA' : ''}. No es una auditoría completa: una
-                    herramienta comercial evalúa cientos de reglas derivadas de OWASP Top 10 y CWE.
+                  <p className="text-[10px] text-slate-500 mt-2 max-w-xl">
+                    Análisis basado en {result.coverage.rulesApplied} patrones
+                    {result.aiEnabled ? ' más una revisión con IA' : ''}. No es una auditoría completa.
                   </p>
                 )}
               </div>
@@ -1230,9 +1284,8 @@ export const ProjectAnalyzer: React.FC = () => {
                   <BrainCircuit className="w-4 h-4 text-violet-300 shrink-0" />
                   <p className="text-xs text-violet-100 leading-relaxed">
                     Revisado con <strong>{result.aiModel}</strong>: {result.aiFindingCount ?? 0}{' '}
-                    hallazgos aporta{result.aiFindingCount === 1 ? 'do' : 'dos'} por la IA, marcados con
-                    la etiqueta <span className="font-bold">IA</span>. El puntaje de arriba ya los
-                    incluye.
+                    hallazgo{result.aiFindingCount === 1 ? '' : 's'} aporta{result.aiFindingCount === 1 ? 'do' : 'dos'} por la IA, marcados con
+                    la etiqueta <span className="font-bold">IA</span>. Ya están incluidos en las cifras de arriba.
                   </p>
                 </div>
               )}
@@ -1243,13 +1296,16 @@ export const ProjectAnalyzer: React.FC = () => {
                 </div>
               )}
 
-              {/* Severity counters */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+              {/* Severity counters. Solo vulnerabilidades: las recomendaciones van en su
+                  propia casilla y en su propio bloque, para que nunca se
+                  confundan con un hallazgo. */}
+              <div className="grid grid-cols-3 sm:grid-cols-5 gap-3 text-center">
                 {[
                   { label: 'Críticos', value: result.criticalFindings, color: 'text-rose-400' },
                   { label: 'Altos', value: result.highFindings, color: 'text-orange-400' },
                   { label: 'Medios', value: result.mediumFindings, color: 'text-amber-400' },
-                  { label: 'Info/Bajo', value: result.lowFindings + allFindings.filter(f => f.severity === 'info').length, color: 'text-blue-400' },
+                  { label: 'Info/Bajo', value: result.lowFindings + (findingsBySeverity.info.length), color: 'text-blue-400' },
+                  { label: 'Recomendaciones', value: advisoryFindings.length, color: 'text-slate-400' },
                 ].map((s) => (
                   <div key={s.label} className="bg-white/10 rounded-xl px-3 py-2">
                     <div className={`text-2xl font-extrabold ${s.color}`}>{s.value}</div>
@@ -1352,7 +1408,7 @@ export const ProjectAnalyzer: React.FC = () => {
                   <details className="bg-white dark:bg-[#1E293B] border border-[#E2E8F0] dark:border-[#334155] rounded-2xl overflow-hidden">
                     <summary className="px-5 py-3 cursor-pointer text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
                       <Calculator className="w-4 h-4" />
-                      Cómo se calculó el puntaje
+                      Índice de riesgo ponderado: {result.overallSecurityScore}/100
                     </summary>
                     <div className="px-5 pb-4">
                       <p className="text-sm text-slate-600 dark:text-slate-300 mb-2">
@@ -1361,8 +1417,11 @@ export const ProjectAnalyzer: React.FC = () => {
                         = <strong>{result.overallSecurityScore}</strong>
                       </p>
                       <p className="text-xs text-slate-400 mb-2">
-                        Índice de riesgo ponderado: cuánto resta cada hallazgo según su severidad.
-                        No mide el porcentaje de código afectado, que está arriba.
+                        Esta cifra resta puntos por severidad: cuánto pesa cada tipo de problema.
+                        <strong className="text-slate-500"> No mide el porcentaje de código afectado</strong>,
+                        que es la cifra grande de arriba. Un 100 aquí solo significa que ninguno de
+                        los {result.coverage?.rulesApplied ?? 15} patrones se activó, no que el
+                        proyecto sea seguro.
                       </p>
                       <ul className="space-y-1">
                         {result.scoreBreakdown.map((l, i) => (

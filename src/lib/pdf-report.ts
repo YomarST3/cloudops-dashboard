@@ -380,6 +380,14 @@ export async function generateAnalysisReportPdf(
       ['Observaciones por 1.000 lineas', String(result.coverage.findingsPerThousandLines)],
       ['Indice de riesgo ponderado', `${num(result.overallSecurityScore)}/100  (penalizacion por severidad, no mide codigo afectado)`],
       ['Reglas aplicadas', `${result.coverage.rulesApplied} patrones${result.aiEnabled ? ' + revision con IA' : ''}`],
+      ...(result.coverage.unattributedFindings
+        ? [
+            [
+              'Hallazgos sin archivo localizable',
+              `${result.coverage.unattributedFindings} (la IA los detecto pero no indico en que archivo estan)`,
+            ] as [string, string],
+          ]
+        : []),
     ];
 
     autoTable(doc, {

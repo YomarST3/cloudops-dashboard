@@ -214,6 +214,15 @@ export interface CoverageMetrics {
   findingsPerThousandLines: number;
   /** Cuantas reglas se aplicaron. Sirve para decir el alcance del analisis. */
   rulesApplied: number;
+  /**
+   * Hallazgos que no se pudieron atribuir a un archivo concreto. Suelen ser de
+   * la IA: el modelo detecta algo pero su texto no trae una ruta legible.
+   *
+   * Se cuentan aparte a proposito. Si no, el porcentaje de archivos saldria en
+   * 0% mientras el total de hallazgos es 1, que es justo la contradiccion que
+   * hace que una pantalla parezca no cuadrar.
+   */
+  unattributedFindings?: number;
 }
 
 export interface ModuleAnalysis {

@@ -521,6 +521,13 @@ function buildCoverage(input: CoverageInput) {
     withFile.filter((f) => !f.advisory).map((f) => f.file as string)
   ).size;
 
+  // Hallazgos que el modelo detecto pero sin decir en que archivo estan. No se
+  // pueden atribuir a un archivo, asi que no entran en los porcentajes, pero SÍ
+  // cuentan para el total. Sin esta cifra aparte, la pantalla puede mostrar
+  // "0% de los archivos" y "1 hallazgo" a la vez, que es lo que hace que un
+  // informe parezca no cuadrar.
+  const unattributedFindings = input.findings.length - withFile.length;
+
   const rate = (n: number) =>
     input.filesAnalyzed > 0 ? Math.round((n / input.filesAnalyzed) * 1000) / 10 : 0;
 
@@ -535,6 +542,7 @@ function buildCoverage(input: CoverageInput) {
         ? Math.round((input.findings.length / input.totalLines) * 1000 * 100) / 100
         : 0,
     rulesApplied: input.rulesApplied,
+    unattributedFindings,
   };
 }
 
@@ -875,13 +883,20 @@ export interface AnalyzeInput {
   region?: string;
 }
 
+/**
+ * "1 hallazgo" / "3 hallazgos". El resumen se lee en voz alta en una
+ * presentacion, y "Se identificaron 1 hallazgos" suena a error delatar.
+ */
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
 function buildSummary(overallScore: number, critical: number, high: number, total: number): string {
   return overallScore >= 85
-    ? `El proyecto tiene una postura de seguridad buena (${overallScore}/100). Se detectaron ${total} observaciones menores que conviene resolver antes del despliegue.`
+    ? `El proyecto tiene una postura de seguridad buena (${overallScore}/100). Se detectaron ${plural(total, 'observación menor', 'observaciones menores')} que conviene resolver antes del despliegue.`
     : overallScore >= 60
-      ? `El proyecto requiere atención en seguridad (${overallScore}/100). Se identificaron ${critical + high} hallazgos críticos/altos que deben corregirse obligatoriamente antes de subir a producción.`
-      : `El proyecto presenta vulnerabilidades serias (${overallScore}/100). Con ${critical} hallazgos críticos y ${high} altos, el código NO debe desplegarse sin corregir los problemas identificados.`;
+      ? `El proyecto requiere atención en seguridad (${overallScore}/100). Se identificaron ${plural(critical + high, 'hallazgo crítico/alto', 'hallazgos críticos/altos')} que deben corregirse obligatoriamente antes de subir a producción.`
+      : `El proyecto presenta vulnerabilidades serias (${overallScore}/100). Con ${plural(critical, 'hallazgo crítico', 'hallazgos críticos')} y ${plural(high, 'alto', 'altos')}, el código NO debe desplegarse sin corregir los problemas identificados.`;
 }
+
 
 /**
  * Normaliza la entrada y decide que se analiza.

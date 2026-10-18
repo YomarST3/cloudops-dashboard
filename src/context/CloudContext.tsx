@@ -811,7 +811,10 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
               showToast(
                 review.aiFindingCount > 0 ? 'info' : 'success',
-                `Revisión con IA completada: ${review.aiFindingCount} hallazgos añadidos con ${review.aiModel}. Nuevo puntaje ${persisted.overallSecurityScore}/100.`,
+                `Revisión con IA completada: ${review.aiFindingCount} hallazgos añadidos con ${review.aiModel}. ` +
+                  (persisted.coverage
+                    ? `Ahora ${persisted.coverage.filesWithVulnerabilities} de ${persisted.coverage.filesAnalyzed} archivos tienen una vulnerabilidad.`
+                    : `Nuevo índice de riesgo: ${persisted.overallSecurityScore}/100.`),
                 'Analizador IA'
               );
             }
