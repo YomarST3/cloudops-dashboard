@@ -138,6 +138,45 @@ export interface SecurityFinding {
    * antes de la IA no lo traen, y en la interfaz se tratan como `regex`.
    */
   source?: 'regex' | 'ai';
+  /**
+   * Ruta real del archivo donde esta el problema, p. ej. "src/routes/auth.js".
+   * Antes el modulo se resolvia por carpeta y el archivo se perdia al agrupar,
+   * asi que un hallazgo no se podia señalar en el codigo. Opcional: los
+   * analisis antiguos no lo traen, y tampoco lo traen los hallazgos de la IA si
+   * el modelo no sabe decir el archivo.
+   */
+  file?: string;
+  /** Linea real dentro de `file`. */
+  line?: number;
+  /**
+   * Consejo de endurecimiento que NO es una vulnerabilidad, del tipo "tienes
+   * imports" o "no validas el env". Esas categorias salían en casi cualquier
+   * proyecto real, asi que penalizarlas hacia que el score fuera bajo sin que
+   * hubiera un solo fallo. Se muestran aparte y no suman al score. Opcional por
+   * compatibilidad con los analisis ya guardados.
+   */
+  advisory?: boolean;
+}
+
+/**
+ * Un control de cumplimiento con aprobado/fallo. Sustituye al porcentaje que
+ * antes salia de "100 menos diez por cada categoria de vulnerabilidad", que
+ * no significaba nada explicable.
+ */
+export interface ComplianceControl {
+  id: string;
+  label: string;
+  passed: boolean;
+  /** Por que pasa o por que falla, en una frase. Es lo que lo hace defendible. */
+  detail: string;
+}
+
+/** Una resta del score, para poder mostrar la cuenta completa. */
+export interface ScoreLine {
+  /** Texto del hallazgo, con su localizacion: "Inyeccion SQL - src/db.ts:12". */
+  label: string;
+  severity: SecurityFindingSeverity;
+  penalty: number;
 }
 
 export interface ModuleAnalysis {
@@ -199,6 +238,16 @@ export interface ProjectAnalysisResult {
   aiFindingCount?: number;
   /** Por que no se pudo completar la revision, si fallo. La IA nunca es bloqueante. */
   aiError?: string;
+  /**
+   * Los controles de cumplimiento con su aprobado/fallo y el motivo. Es la
+   * version explicable del porcentaje: seis preguntas con nombre en vez de un
+   * numero del que no se sabe de donde sale.
+   */
+  complianceControls?: ComplianceControl[];
+  /** La cuenta del score, resta a resta, para poder mostrarla y justificarla. */
+  scoreBreakdown?: ScoreLine[];
+  /** Cuantos hallazgos son recomendaciones y no vulnerabilidades. */
+  advisoryCount?: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

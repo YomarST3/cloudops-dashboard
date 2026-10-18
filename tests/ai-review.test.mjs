@@ -249,5 +249,45 @@ check('prompt: pide revisar RLS', /RLS/i.test(sentBody));
 await call({ GEMINI_API_KEY: 'AIza-fake' }, capture(INPUT), INPUT);
 check('prompt: en proyecto sin stack conocido usa el foco generico', /no encaja en un stack conocido/.test(sentBody));
 
+// ── 12. La IA también dice archivo y línea cuando puede ─────────────────────
+// El modelo mete la localizacion dentro de lineHint como texto; si no se
+// extrae a campos estructurados, el hallazgo no se puede abrir en el codigo.
+const locBody = (hint) => ({
+  candidates: [{
+    content: {
+      parts: [{
+        text: JSON.stringify({
+          findings: [{
+            severity: 'high', category: 'Access Control', title: 'Sin autorizacion',
+            description: 'd', recommendation: 'r', cweId: 'CWE-862', lineHint: hint,
+          }],
+        }),
+      }],
+    },
+  }],
+});
+
+const locCases = [
+  ['app/src/routes/auth.js:42', 'app/src/routes/auth.js', 42],
+  ['src/db.ts:7', 'src/db.ts', 7],
+  ['supabase/migrations/001.sql, línea 18', 'supabase/migrations/001.sql', 18],
+  ['en src/lib/x.js linea 9', 'src/lib/x.js', 9],
+  ['src/components/Table.tsx', 'src/components/Table.tsx', undefined],
+  ['línea 55', undefined, 55],
+  ['sin ninguna ubicacion', undefined, undefined],
+];
+
+for (const [hint, file, line] of locCases) {
+  const r = await call({ GEMINI_API_KEY: 'AIza-fake' }, () =>
+    Promise.resolve({ status: 200, ok: true, json: async () => locBody(hint) })
+  );
+  const f = r.result.modules.flatMap((m) => m.findings).find((x) => x.source === 'ai');
+  check(
+    `localizacion IA: "${hint}"`,
+    f?.file === file && f?.line === line,
+    `-> file=${f?.file} line=${f?.line}`
+  );
+}
+
 console.log(fails === 0 ? '\nTODAS LAS PRUEBAS PASAN' : `\n${fails} prueba(s) fallan`);
 process.exit(fails === 0 ? 0 : 1);

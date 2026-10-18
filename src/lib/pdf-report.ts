@@ -299,8 +299,8 @@ export async function generateAnalysisReportPdf(
 
   const cards = [
     { label: 'Puntaje de seguridad', value: `${num(result.overallSecurityScore)}/100`, rgb: scoreColor(num(result.overallSecurityScore)) },
-    { label: 'Cumplimiento estimado', value: `${num(result.complianceScore)}%`, rgb: scoreColor(num(result.complianceScore)) },
-    { label: 'Hallazgos totales', value: `${num(result.totalFindings)}`, rgb: BODY as [number, number, number] },
+    { label: 'Controles de cumplimiento', value: `${num(result.complianceScore)}%`, rgb: scoreColor(num(result.complianceScore)) },
+    { label: 'Vulnerabilidades', value: `${num(result.totalFindings)}`, rgb: BODY as [number, number, number] },
   ];
 
   const cardW = (CONTENT_W - 8) / 3;
@@ -389,7 +389,70 @@ export async function generateAnalysisReportPdf(
   });
   y = tableEndY(doc, y) + 10;
 
-  // ── 4. Tabla de hallazgos ─────────────────────────────────────────────────
+  // ── 3. Controles de cumplimiento y de dónde sale el puntaje ───────────────
+  // Antes el PDF imprimía un "cumplimiento estimado" sin explicar de dónde
+  // salía. Ahora son controles con nombre y motivo, y la resta del score, para
+  // que el informe se pueda defender sin tener que dar explicaciones aparte.
+  if (result.complianceControls?.length) {
+    if (y > CONTENT_BOTTOM - 50) {
+      doc.addPage();
+      y = CONTENT_TOP;
+    }
+    doc.text('3. CONTROLES DE CUMPLIMIENTO', MARGIN, y);
+    y += 7;
+
+    autoTable(doc, {
+      startY: y,
+      head: [['Control', 'Estado', 'Motivo']],
+      body: result.complianceControls.map<RowInput>((c) => [
+        { content: c.label, styles: { fontStyle: 'bold' } },
+        {
+          content: c.passed ? 'CUMPLE' : 'NO CUMPLE',
+          styles: { textColor: c.passed ? [22, 163, 74] : [225, 29, 72], fontStyle: 'bold' },
+        },
+        c.detail,
+      ]),
+      theme: 'striped',
+      headStyles: { fillColor: BRAND, textColor: 255, fontStyle: 'bold', fontSize: 8.5 },
+      styles: { fontSize: 8.5, cellPadding: 2.2, textColor: BODY },
+      columnStyles: { 0: { cellWidth: 38 }, 1: { cellWidth: 28, halign: 'center' } },
+      margin: { left: MARGIN, right: MARGIN },
+    });
+    y = tableEndY(doc, y) + 10;
+  }
+
+  if (result.scoreBreakdown?.length) {
+    if (y > CONTENT_BOTTOM - 40) {
+      doc.addPage();
+      y = CONTENT_TOP;
+    }
+    doc.text('4. COMO SE CALCULO EL PUNTAJE', MARGIN, y);
+    y += 7;
+
+    doc.setFontSize(8.5);
+    doc.setTextColor(...BODY);
+    const resta = result.scoreBreakdown.map((l) => l.penalty).join(' - ');
+    doc.text(`100 - ${resta} = ${result.overallSecurityScore}`, MARGIN, y);
+    y += 12;
+
+    autoTable(doc, {
+      startY: y,
+      head: [['Resta', 'Hallazgo que la provoca', 'Severidad']],
+      body: result.scoreBreakdown.map<RowInput>((l) => [
+        `-${l.penalty}`,
+        l.label,
+        { content: SEVERITY[l.severity].label, styles: { textColor: SEVERITY[l.severity].rgb } },
+      ]),
+      theme: 'striped',
+      headStyles: { fillColor: BRAND, textColor: 255, fontStyle: 'bold', fontSize: 8.5 },
+      styles: { fontSize: 8, cellPadding: 2, textColor: BODY },
+      columnStyles: { 0: { cellWidth: 16, halign: 'right' }, 2: { cellWidth: 30 } },
+      margin: { left: MARGIN, right: MARGIN },
+    });
+    y = tableEndY(doc, y) + 10;
+  }
+
+  // ── 5. Tabla de hallazgos ─────────────────────────────────────────────────
   if (y > CONTENT_BOTTOM - 40) {
     doc.addPage();
     y = CONTENT_TOP;
@@ -397,10 +460,16 @@ export async function generateAnalysisReportPdf(
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(11.5);
   doc.setTextColor(...BRAND_DARK);
-  doc.text('3. INVENTARIO DE HALLAZGOS', MARGIN, y);
+  doc.text('5. INVENTARIO DE VULNERABILIDADES', MARGIN, y);
   y += 7;
 
-  const findingsBody: RowInput[] = allFindings
+  // Las recomendaciones se imprimen aparte y al final: son consejos de
+  // endurecimiento, no fallos, y mezclarlas hacia que el informe pareciera
+  // catastrofista para un codigo perfectamente correcto.
+  const vulnOnly = allFindings.filter((f) => !f.advisory);
+  const advisories = allFindings.filter((f) => f.advisory);
+
+  const findingsBody: RowInput[] = vulnOnly
     .slice()
     .sort((a, b) => {
       const order: SecurityFindingSeverity[] = ['critical', 'high', 'medium', 'low', 'info'];
@@ -414,8 +483,10 @@ export async function generateAnalysisReportPdf(
         // El sufijo deja claro en el PDF que capa detecto el hallazgo, igual
         // que hace la etiqueta "IA" en la pantalla.
         f.source === 'ai' ? `${f.title}  [IA]` : f.title,
-        f.affectedModule,
-        f.lineHint ?? '-',
+        // Archivo y linea reales: lo que permite abrir el codigo y comprobar
+        // el hallazgo. Antes solo ponia la carpeta, que no senala nada.
+        f.file ?? f.affectedModule,
+        f.line ? `L${f.line}` : '-',
         f.cweId ?? '-',
       ];
     });
@@ -432,7 +503,7 @@ export async function generateAnalysisReportPdf(
   } else {
     autoTable(doc, {
       startY: y,
-      head: [['Severidad', 'Categoria', 'Hallazgo', 'Modulo', 'Linea', 'CWE']],
+      head: [['Severidad', 'Categoria', 'Hallazgo', 'Archivo', 'Linea', 'CWE']],
       body: findingsBody,
       theme: 'grid',
       headStyles: { fillColor: BRAND_DARK, textColor: 255, fontStyle: 'bold', fontSize: 8 },
@@ -450,13 +521,48 @@ export async function generateAnalysisReportPdf(
     y = tableEndY(doc, y) + 10;
   }
 
-  // ── 5. Detalle por modulo ─────────────────────────────────────────────────
+  // Las recomendaciones cierran el informe, separadas de las vulnerabilidades.
+  if (advisories.length > 0) {
+    if (y > CONTENT_BOTTOM - 40) {
+      doc.addPage();
+      y = CONTENT_TOP;
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11.5);
+    doc.setTextColor(...BRAND_DARK);
+    doc.text('6. RECOMENDACIONES (NO PENALIZAN EL PUNTAJE)', MARGIN, y);
+    y += 7;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.5);
+    doc.setTextColor(...MUTED);
+    doc.text(
+      'Buenos practicas detectadas que no son vulnerabilidades, por eso no bajan el puntaje.',
+      MARGIN,
+      y
+    );
+    y += 12;
+
+    autoTable(doc, {
+      startY: y,
+      head: [['Recomendacion', 'Archivo', 'Que hacer']],
+      body: advisories.map<RowInput>((f) => [f.title, f.file ?? f.affectedModule, f.recommendation]),
+      theme: 'grid',
+      headStyles: { fillColor: BRAND_DARK, textColor: 255, fontStyle: 'bold', fontSize: 8 },
+      styles: { fontSize: 7.8, cellPadding: 1.8, textColor: BODY, lineColor: HAIRLINE, overflow: 'ellipsize' },
+      columnStyles: { 0: { cellWidth: 44 }, 1: { cellWidth: 40 }, 2: { cellWidth: 98 } },
+      margin: { left: MARGIN, right: MARGIN },
+    });
+    y = tableEndY(doc, y) + 10;
+  }
+
+  // ── 7. Detalle por modulo ─────────────────────────────────────────────────
   doc.addPage();
   y = CONTENT_TOP;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(11.5);
   doc.setTextColor(...BRAND_DARK);
-  doc.text('4. DETALLE POR MODULO Y REMEDIACION', MARGIN, y);
+  doc.text('7. DETALLE POR MODULO Y REMEDIACION', MARGIN, y);
   y += 7;
 
   const FINDING_INDENT = MARGIN + 5;
@@ -464,9 +570,12 @@ export async function generateAnalysisReportPdf(
 
   const drawFinding = (f: SecurityFinding, top: number): number => {
     const severity = SEVERITY[f.severity];
-    const meta = [f.affectedModule, f.lineHint ? `linea ${f.lineHint}` : null, f.cweId]
-      .filter(Boolean)
-      .join('  ·  ');
+    // La localizacion va primero y con el formato archivo:linea, que es lo que
+  // permite abrir el codigo y comprobar el hallazgo.
+  const meta = [
+      f.file ? (f.line ? `${f.file}:${f.line}` : f.file) : f.affectedModule,
+      f.cweId,
+    ].filter(Boolean).join('  ·  ');
 
     // Medimos todo el bloque antes de escribirlo: si no cabe entero, pasa a la
     // pagina siguiente en vez de partirlo a la mitad.

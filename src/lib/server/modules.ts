@@ -182,6 +182,37 @@ export interface FileModule {
   language: string;
   framework?: string;
   fileCount: number;
+  /**
+   * Que archivo ocupa que rango de lineas dentro de `content`.
+   *
+   * Un modulo son varios archivos pegados con '\n\n', y al pegarlos se perdia
+   * donde acababa cada uno. Por eso no habia forma de señalar un hallazgo en el
+   * codigo: solo se sabia la carpeta. Con estos rangos, el offset de un match
+   * se traduce a "archivo + linea", que es lo que hace el analisis verificable.
+   */
+  spans: FileSpan[];
+}
+
+/** Rango ocupado por un archivo dentro del contenido de un modulo. */
+export interface FileSpan {
+  path: string;
+  /** Lineas 1-based del contenido del modulo. */
+  startLine: number;
+  endLine: number;
+}
+
+/**
+ * Localiza un offset del contenido del modulo: devuelve archivo y linea real.
+ * Devuelve null si el offset cae fuera de todo span (no deberia pasar).
+ */
+export function locate(module: FileModule, offset: number): { file: string; line: number } | null {
+  if (module.spans.length === 0) return null;
+
+  const line = module.content.slice(0, offset).split('\n').length;
+  const span = module.spans.find((s) => line >= s.startLine && line <= s.endLine);
+  if (!span) return null;
+
+  return { file: span.path, line: line - span.startLine + 1 };
 }
 
 /**
@@ -203,12 +234,25 @@ export function buildFolderModules(files: SourceFile[]): FileModule[] {
 
   const toModule = (name: string, groupFiles: SourceFile[]): FileModule => {
     const content = groupFiles.map((f) => f.content).join('\n\n');
+
+    // Se reconstruye la tabla de archivos mientras se pega el contenido. Cada
+    // archivo ocupa lineas consecutiveas, asi que basta con ir sumando las
+    // lineas de cada uno mas la linea en blanco del separador.
+    const spans: FileSpan[] = [];
+    let cursor = 1;
+    for (const f of groupFiles) {
+      const lines = f.content.split('\n').length;
+      spans.push({ path: f.path, startLine: cursor, endLine: cursor + lines - 1 });
+      cursor += lines + 1; // +1 por el separador
+    }
+
     return {
       name,
       content,
       language: dominantLanguage(groupFiles),
       framework: detectFramework(content),
       fileCount: groupFiles.length,
+      spans,
     };
   };
 
@@ -236,6 +280,9 @@ export function buildSingleModule(code: string, projectName: string): FileModule
     language: guessLanguageFromContent(code),
     framework: detectFramework(code),
     fileCount: 1,
+    // Sin marcadores no hay nombres de archivo: un unico span que cubre todo el
+    // contenido hace que locate() devuelva null en vez de inventar un archivo.
+    spans: [],
   };
 }
 

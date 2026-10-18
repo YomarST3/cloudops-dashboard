@@ -172,6 +172,35 @@ interface RawFinding {
 const str = (v: unknown, max = 400): string =>
   typeof v === 'string' ? v.trim().slice(0, max) : '';
 
+/**
+ * Gemini suele devolver la localizacion dentro de lineHint, como "app/db.ts:12"
+ * o "src/routes/auth.js, línea 42". Se intenta extraer a campos estructurados
+ * para que el hallazgo se pueda abrir en el codigo igual que uno del regex: si
+ * solo se muestra el texto suelto, no hay forma de comprobarlo.
+ */
+function parseLocation(hint: string): { file?: string; line?: number } {
+  if (!hint) return {};
+
+  const withColon = hint.match(/([\w./\\-]+\.[a-z]{1,5}):(\d{1,6})/i);
+  if (withColon) {
+    return { file: withColon[1].replace(/^.*?(?=(src|app|lib|api|pages|server|supabase)\/)/, ''), line: Number(withColon[2]) };
+  }
+
+  const fileThenLine = hint.match(/([\w./\\-]+\.[a-z]{1,5})[^\d\n]{0,12}(?:línea|linea|line)\s*(\d{1,6})/i);
+  if (fileThenLine) {
+    return { file: fileThenLine[1], line: Number(fileThenLine[2]) };
+  }
+
+  const lineOnly = hint.match(/(?:^|\s)(?:línea|linea|line)\s*(\d{1,6})/i);
+  if (lineOnly) return { line: Number(lineOnly[1]) };
+
+  // Solo el nombre de archivo, sin linea.
+  const fileOnly = hint.match(/(?:^|\s)((?:[\w-]+\/)+[\w.-]+\.[a-z]{1,5})\b/);
+  if (fileOnly) return { file: fileOnly[1] };
+
+  return {};
+}
+
 /** Convierte la respuesta del modelo en hallazgos validos, o la descarta. */
 function toFindings(raw: unknown, moduleName: string, idPrefix: string): SecurityFinding[] {
   // El prompt pide { findings: [...] }, pero JSON mode no garantiza la envoltura.
@@ -200,6 +229,8 @@ function toFindings(raw: unknown, moduleName: string, idPrefix: string): Securit
     const category = str(item.category, 60) || 'Security';
     const recommendation = str(item.recommendation) || 'Revisar y corregir manualmente.';
     const cweId = /^CWE-\d+$/i.test(str(item.cweId, 12)) ? str(item.cweId, 12).toUpperCase() : undefined;
+    const hint = str(item.lineHint, 120);
+    const where = parseLocation(hint);
 
     out.push({
       // El id lleva `ai-mod...` a proposito: la deduplicacion normaliza con
@@ -211,7 +242,9 @@ function toFindings(raw: unknown, moduleName: string, idPrefix: string): Securit
       title,
       description,
       affectedModule: moduleName,
-      lineHint: str(item.lineHint, 120) || undefined,
+      lineHint: hint || undefined,
+      file: where.file,
+      line: where.line,
       recommendation,
       cweId,
       source: 'ai',
@@ -343,7 +376,9 @@ export default async function handler(req: any, res: any) {
 
   // El codigo que se manda a Gemini sale de prepare(), el mismo recorrido que
   // usa analyzeCode: mismo orden de modulos, mismos limites, mismo contenido.
-  const targets = prepare(body ?? {}).fileModules.map((m, i) => ({
+  const prepared = prepare(body ?? {});
+
+  const targets = prepared.fileModules.map((m, i) => ({
     index: i,
     name: m.name,
     content: m.content,
@@ -410,7 +445,7 @@ export default async function handler(req: any, res: any) {
     aiError = `Gemini fallo en ${problems} de ${outcomes.length} modulos; el resto se reviso con normalidad.`;
   }
 
-  const merged = applyAiFindings(base, aiByModule);
+  const merged = applyAiFindings(base, aiByModule, prepared.analysisTarget);
 
   // Se cuenta DESPUES de fusionar, no antes. applyAiFindings descarta los
   // hallazgos de IA cuyo CWE ya cubria el regex, asi que contar en este punto lo

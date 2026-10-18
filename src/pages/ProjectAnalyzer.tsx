@@ -14,6 +14,9 @@ import {
   AlertTriangle,
   AlertCircle,
   Info,
+  XCircle,
+  Calculator,
+  Lightbulb,
   CheckCircle2,
   Server,
   DollarSign,
@@ -336,10 +339,20 @@ const FindingCard: React.FC<{ finding: SecurityFinding }> = ({ finding }) => {
             )}
           </div>
           <p className={`text-sm font-semibold mt-1 ${cfg.color}`}>{finding.title}</p>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            Módulo afectado: <strong>{finding.affectedModule}</strong>
-            {finding.lineHint && <> · {finding.lineHint}</>}
-          </p>
+          {finding.file ? (
+            <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5 font-mono">
+              <span className="text-slate-400 dark:text-slate-500">en </span>
+              {finding.file}
+              {finding.line ? `:${finding.line}` : ''}
+            </p>
+          ) : (
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Módulo afectado: <strong>{finding.affectedModule}</strong>
+            </p>
+          )}
+          {finding.lineHint && (
+            <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">{finding.lineHint}</p>
+          )}
         </div>
         {expanded ? <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" /> : <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />}
       </button>
@@ -710,12 +723,21 @@ export const ProjectAnalyzer: React.FC = () => {
       )
     : [];
 
+  /**
+   * Las recomendaciones se separan de las vulnerabilidades. Son consejos de
+   * endurecimiento ("tienes imports", "no hay rate limit") que antes contaban
+   * como hallazgos y hacian que casi todo proyecto real saliera con 80 puntos
+   * sin un solo fallo. Se muestran, pero no restan.
+   */
+  const vulnerabilityFindings = allFindings.filter((f) => !f.advisory);
+  const advisoryFindings = allFindings.filter((f) => f.advisory);
+
   const findingsBySeverity = {
-    critical: allFindings.filter((f) => f.severity === 'critical'),
-    high: allFindings.filter((f) => f.severity === 'high'),
-    medium: allFindings.filter((f) => f.severity === 'medium'),
-    low: allFindings.filter((f) => f.severity === 'low'),
-    info: allFindings.filter((f) => f.severity === 'info'),
+    critical: vulnerabilityFindings.filter((f) => f.severity === 'critical'),
+    high: vulnerabilityFindings.filter((f) => f.severity === 'high'),
+    medium: vulnerabilityFindings.filter((f) => f.severity === 'medium'),
+    low: vulnerabilityFindings.filter((f) => f.severity === 'low'),
+    info: vulnerabilityFindings.filter((f) => f.severity === 'info'),
   };
 
   /**
@@ -1188,10 +1210,38 @@ export const ProjectAnalyzer: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="bg-white dark:bg-[#1E293B] border border-[#E2E8F0] dark:border-[#334155] rounded-2xl p-5 shadow-sm">
               <div className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2 flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-blue-500" /> Cumplimiento Estimado
+                <ShieldCheck className="w-4 h-4 text-blue-500" /> Controles de Cumplimiento
               </div>
-              <div className={`text-3xl font-extrabold ${scoreColor(result.complianceScore)}`}>{result.complianceScore}%</div>
-              <p className="text-xs text-slate-500 mt-1">Basado en categorías de vulnerabilidades detectadas</p>
+              <div className={`text-3xl font-extrabold ${scoreColor(result.complianceScore)}`}>
+                {result.complianceScore}%
+              </div>
+              {result.complianceControls ? (
+                <>
+                  <p className="text-xs text-slate-500 mt-1 mb-2">
+                    {result.complianceControls.filter((c) => c.passed).length} de{' '}
+                    {result.complianceControls.length} controles implementados
+                  </p>
+                  <ul className="space-y-1.5">
+                    {result.complianceControls.map((c) => (
+                      <li key={c.id} className="flex items-start gap-2 text-xs">
+                        {c.passed ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />
+                        ) : (
+                          <XCircle className="w-3.5 h-3.5 text-rose-500 shrink-0 mt-0.5" />
+                        )}
+                        <span className={c.passed ? 'text-slate-600 dark:text-slate-300' : 'text-rose-600 dark:text-rose-400'}>
+                          <strong>{c.label}</strong>
+                          <span className="block text-slate-400 dark:text-slate-500">{c.detail}</span>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p className="text-xs text-slate-500 mt-1">
+                  Análisis anterior: sin desglose de controles
+                </p>
+              )}
             </div>
             <div className="bg-white dark:bg-[#1E293B] border border-[#E2E8F0] dark:border-[#334155] rounded-2xl p-5 shadow-sm">
               <div className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2 flex items-center gap-2">
@@ -1243,6 +1293,69 @@ export const ProjectAnalyzer: React.FC = () => {
             {/* Findings Tab */}
             {activeTab === 'findings' && (
               <div className="space-y-6">
+                {/* La cuenta del score, para que el número no sea una caja negra */}
+                {result.scoreBreakdown && result.scoreBreakdown.length > 0 && (
+                  <details className="bg-white dark:bg-[#1E293B] border border-[#E2E8F0] dark:border-[#334155] rounded-2xl overflow-hidden">
+                    <summary className="px-5 py-3 cursor-pointer text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                      <Calculator className="w-4 h-4" />
+                      Cómo se calculó el puntaje
+                    </summary>
+                    <div className="px-5 pb-4">
+                      <p className="text-sm text-slate-600 dark:text-slate-300 mb-2">
+                        100 −{' '}
+                        {result.scoreBreakdown.map((l) => l.penalty).join(' − ')}{' '}
+                        = <strong>{result.overallSecurityScore}</strong>
+                      </p>
+                      <ul className="space-y-1">
+                        {result.scoreBreakdown.map((l, i) => (
+                          <li key={i} className="text-xs text-slate-500 dark:text-slate-400 font-mono">
+                            −{l.penalty} · {l.label}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </details>
+                )}
+
+                {/* Recomendaciones: se muestran, pero no penalizan el score */}
+                {advisoryFindings.length > 0 && (
+                  <details className="bg-white dark:bg-[#1E293B] border border-[#E2E8F0] dark:border-[#334155] rounded-2xl overflow-hidden">
+                    <summary className="px-5 py-3 cursor-pointer text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                      <Lightbulb className="w-4 h-4" />
+                      Recomendaciones ({advisoryFindings.length}) — no penalizan el puntaje
+                    </summary>
+                    <div className="px-5 pb-4 space-y-2">
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Son buenas prácticas, no vulnerabilidades. Por eso van aparte y no bajan
+                        la nota: penalizarlas hacía que casi todo proyecto real saliera con 80
+                        puntos sin tener un solo fallo.
+                      </p>
+                      {advisoryFindings.map((f) => (
+                        <div
+                          key={f.id}
+                          className="flex items-start gap-2 p-3 rounded-xl border border-slate-200 dark:border-slate-700"
+                        >
+                          <Lightbulb className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+                          <div className="min-w-0">
+                            <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                              {f.title}
+                            </p>
+                            {f.file && (
+                              <p className="text-[10px] font-mono text-slate-400">
+                                {f.file}
+                                {f.line ? `:${f.line}` : ''}
+                              </p>
+                            )}
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                              {f.recommendation}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+
                 {result.totalFindings === 0 ? (
                   <div className="flex flex-col items-center justify-center py-16 gap-4">
                     <div className="w-16 h-16 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 flex items-center justify-center">
