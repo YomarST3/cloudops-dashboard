@@ -414,6 +414,29 @@ export async function generateAnalysisReportPdf(
       CONTENT_W,
       { gap: 4 }
     );
+
+    // Reparto por lenguaje: deja de ser ambiguo "no encontramos nada" cuando
+    // lo que en realidad es "no miramos ese lenguaje".
+    if (result.coverage.perLanguage?.length) {
+      y += 2;
+      autoTable(doc, {
+        startY: y,
+        head: [['Lenguaje', 'Archivos', 'Reglas', 'Detecciones', 'Vulnerabilidades']],
+        body: result.coverage.perLanguage.map<RowInput>((l) => [
+          { content: l.language, styles: { fontStyle: 'bold' } },
+          String(l.files),
+          String(l.rules),
+          String(l.detections),
+          { content: String(l.vulnerabilities), styles: { fontStyle: 'bold' } },
+        ]),
+        theme: 'grid',
+        headStyles: { fillColor: PANEL, textColor: BRAND_DARK, fontStyle: 'bold', fontSize: 7.5 },
+        styles: { fontSize: 8, cellPadding: 1.6, textColor: BODY, lineColor: HAIRLINE },
+        columnStyles: { 1: { halign: 'center' }, 2: { halign: 'center' }, 3: { halign: 'center' }, 4: { halign: 'center' } },
+        margin: { left: MARGIN, right: MARGIN },
+      });
+      y = tableEndY(doc, y) + 8;
+    }
   }
 
   // ── 3. Distribucion por severidad ─────────────────────────────────────────

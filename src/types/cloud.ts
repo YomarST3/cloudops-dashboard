@@ -223,6 +223,14 @@ export interface CoverageMetrics {
    * hace que una pantalla parezca no cuadrar.
    */
   unattributedFindings?: number;
+  /** Que se reviso en cada lenguaje: archivos, reglas aplicadas y detecciones. */
+  perLanguage?: {
+    language: string;
+    files: number;
+    rules: number;
+    detections: number;
+    vulnerabilities: number;
+  }[];
 }
 
 export interface ModuleAnalysis {

@@ -34,9 +34,126 @@ interface FindingDef {
    * viendo con su archivo y su linea, solo deja de bajar el puntaje.
    */
   advisoryWhen?: (ctx: { line: string; file: string; match: string }) => boolean;
+  /**
+   * A que lenguajes aplica la regla. Si no se indica, aplica a todos.
+   *
+   * Hace falta porque los patrones no viven solos en su lenguaje: la palabra
+   * "service_role" es una credencial gravísima en un \.ts de cliente, pero es
+   * algo completamente normal dentro de un GRANT en una migracion de Postgres.
+   * Sin este filtro, cada regla de JS dispararia tambien sobre el SQL.
+   */
+  languages?: string[];
 }
 
 // ─── Patrones de análisis de seguridad ───────────────────────────────────────
+
+// ─── Reglas de SQL y Supabase ────────────────────────────────────────────────
+//
+// El motor de patrones miraba solo Javascript. En un proyecto con Supabase el
+// riesgo de verdad esta en las migraciones: si una tabla no tiene Row Level
+// Security, la clave publica "anon" que viaja en el navegador puede leerla
+// entera. Ese SQL ademas no llegaba ni a enviarse (ver la seleccion de archivos
+// en ProjectAnalyzer), asi que no es que no se encontrara nada: es que no se
+// miraba.
+//
+// Tres reglas son patrones normales. La cuarta, "tabla sin RLS", no cabe en un
+// regex porque exige comparar dos conjuntos: las tablas que se crean y las que
+// se protegen. Va aparte, como auditSqlModule().
+
+const SQL_RULES: FindingDef[] = [
+  {
+    id: 'service-role-in-client',
+    severity: 'critical',
+    category: 'Secrets Management',
+    title: 'Clave service_role accesible desde el cliente',
+    description:
+      'La clave service_role aparece en codigo de cliente. Esa clave evade por completo Row Level Security: con ella se pueden leer y modificar todas las tablas, saltandose las politicas. Es la diferencia entre "la base de datos esta protegida" y "no lo esta".',
+    recommendation:
+      'Revocarla en el panel de Supabase y mantenerla solo en el servidor, en una variable de entorno del backend. En el cliente solo debe existir la clave anon, que es publica por diseno y esta pensada para ir en el navegador.',
+    cweId: 'CWE-798',
+    pattern: /service_role/i,
+    languages: ['TypeScript', 'JavaScript'],
+  },
+  {
+    id: 'rls-permissive-write',
+    severity: 'high',
+    category: 'Access Control',
+    title: 'Politica de escritura abierta a cualquiera',
+    description:
+      'Una politica usa USING (true) o WITH CHECK (true) sobre INSERT, UPDATE o DELETE. Eso permite que cualquiera escriba, cambie o borre filas sin ninguna condicion, incluso con la clave anonima.',
+    recommendation:
+      'Restringir la escritura al dueno de la fila: WITH CHECK (auth.uid() = user_id). Si la tabla solo la escribe el backend, deja la politica sin TO para el usuario y quita el acceso de escritura al rol anon.',
+    cweId: 'CWE-862',
+    pattern:
+      /CREATE\s+POLICY[^;]{0,400}FOR\s+(?:ALL|INSERT|UPDATE|DELETE)[^;]{0,300}(?:USING|WITH\s+CHECK)\s*\(\s*(?:true|1)\s*\)/i,
+    languages: ['SQL'],
+  },
+  {
+    id: 'rls-permissive-read',
+    severity: 'low',
+    category: 'Access Control',
+    title: 'Lectura publica sin restriccion',
+    description:
+      'Una politica permite leer toda la tabla sin condicion, incluso a usuarios anonimos. Puede ser intencionado (un catalogo publico), pero si la tabla guarda datos personales o de negocio es una fuga.',
+    recommendation:
+      'Confirma que solo haya datos publicos. Si hay informacion sensible, cambia a USING (auth.uid() = user_id) para los autenticados y deja la lectura anonima solo para lo que sea realmente publico.',
+    cweId: 'CWE-639',
+    pattern: /CREATE\s+POLICY[^;]{0,400}FOR\s+SELECT[^;]{0,300}USING\s*\(\s*(?:true|1)\s*\)/i,
+    languages: ['SQL'],
+  },
+];
+
+/**
+ * Tablas creadas que nunca se protegen con Row Level Security.
+ *
+ * No cabe en un regex: hay que leer el modulo entero y comparar. Con la clave
+ * anon dentro del bundle del navegador, una tabla sin RLS es una tabla publica.
+ */
+function auditSqlModule(module: FileModule, idPrefix: string) {
+  if (module.language !== 'SQL') return [];
+
+  const content = module.content;
+  const out: SecurityFinding[] = [];
+
+  const protectedTables = new Set<string>();
+  const rlsRe =
+    /ALTER\s+TABLE\s+(?:ONLY\s+)?(?:public\.)?"?([a-z_][a-z0-9_]*)"?\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY/gi;
+  let m: RegExpExecArray | null;
+  while ((m = rlsRe.exec(content)) !== null) protectedTables.add(m[1].toLowerCase());
+
+  const createdRe =
+    /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?"?([a-z_][a-z0-9_]*)"?/gi;
+  const seen = new Set<string>();
+
+  while ((m = createdRe.exec(content)) !== null) {
+    const name = m[1].toLowerCase();
+    if (protectedTables.has(name) || seen.has(name)) continue;
+    seen.add(name);
+
+    const where = locate(module, m.index);
+
+    out.push({
+      id: `${idPrefix}-sql-no-rls-${name}`,
+      severity: 'high',
+      category: 'Access Control',
+      title: `Tabla "${name}" sin Row Level Security`,
+      description:
+        `La tabla ${name} se crea pero nunca se le ejecuta ALTER TABLE ... ENABLE ROW LEVEL SECURITY. ` +
+        'La clave anon viaja dentro del bundle del navegador y es publica por diseno, asi que sin RLS ' +
+        'cualquiera que abra las herramientas de red del navegador puede leer o escribir todas sus filas.',
+      recommendation:
+        `Ejecuta ALTER TABLE public.${name} ENABLE ROW LEVEL SECURITY y crea politicas que comprueben ` +
+        'la propiedad, del estilo USING (auth.uid() = user_id).',
+      affectedModule: module.name,
+      cweId: 'CWE-284',
+      source: 'regex',
+      file: where?.file,
+      line: where?.line,
+    });
+  }
+
+  return out;
+}
 
 const SECURITY_PATTERNS: FindingDef[] = [
   {
@@ -352,6 +469,10 @@ function parseFiles(code: string): SourceFile[] {
 }
 
 const MAX_MODULES = 20;
+
+// Tipo SOLO: se borra al compilar, asi que no afecta a que este fichero sea
+// autocontenido en tiempo de ejecucion.
+import type { SecurityFinding } from '../src/types/cloud';
 
 interface FileSpan {
   path: string;
@@ -767,6 +888,8 @@ function matchAll(
 // ─── Metricas de cobertura ───────────────────────────────────────────────────
 
 interface CoverageInput {
+  /** Que se reviso en cada lenguaje, para poder decirlo. */
+  perLanguage?: ReturnType<typeof buildLanguageCoverage>;
   filesAnalyzed: number;
   totalLines: number;
   findings: { file?: string; advisory?: boolean }[];
@@ -778,6 +901,51 @@ interface CoverageInput {
  * herramientas comerciales, y las que un humano puede comprobar: "el 2,9% de
  * los archivos tiene alguna observacion" se defiende; "95/100 de seguridad" no.
  */
+/**
+ * Que se reviso en cada lenguaje.
+ *
+ * Es la linea que distingue "no encontre nada" de "no mire". Con SQL en el
+ * proyecto, sin esto la pantalla decia lo mismo en los dos casos, que es
+ * exactamente el tipo de ambiguedad que hace que un informe no se pueda
+ * defender: si preguntan "revisaste las migraciones", no hay forma de responder.
+ */
+function buildLanguageCoverage(modules: {
+  moduleName: string;
+  language: string;
+  fileCount?: number;
+  findings: { advisory?: boolean }[];
+}[]): {
+  language: string;
+  files: number;
+  rules: number;
+  detections: number;
+  vulnerabilities: number;
+}[] {
+  const byLang = new Map<string, { files: number; detections: number; vulnerabilities: number }>();
+
+  for (const m of modules) {
+    const entry = byLang.get(m.language) ?? { files: 0, detections: 0, vulnerabilities: 0 };
+    entry.files += m.fileCount ?? 0;
+    entry.detections += m.findings.length;
+    entry.vulnerabilities += m.findings.filter((f) => !f.advisory).length;
+    byLang.set(m.language, entry);
+  }
+
+  return Array.from(byLang.entries())
+    .map(([language, v]) => ({
+      language,
+      files: v.files,
+      // Las reglas de SQL solo cuentan para SQL: son las que evitan que
+      // "service_role" sea critica en cada GRANT de una migracion.
+      rules: language === 'SQL'
+        ? SECURITY_PATTERNS.length + SQL_RULES.length
+        : SECURITY_PATTERNS.filter((p) => !p.languages || p.languages.includes(language)).length,
+      detections: v.detections,
+      vulnerabilities: v.vulnerabilities,
+    }))
+    .sort((a, b) => b.files - a.files);
+}
+
 function buildCoverage(input: CoverageInput) {
   const withFile = input.findings.filter((f) => Boolean(f.file));
 
@@ -807,6 +975,7 @@ function buildCoverage(input: CoverageInput) {
         : 0,
     rulesApplied: input.rulesApplied,
     unattributedFindings,
+    perLanguage: input.perLanguage,
   };
 }
 
@@ -823,13 +992,22 @@ function analyzeModule(
   fileCount: number;
   linesAnalyzed: number;
   securityScore: number;
-  findings: ReturnType<typeof buildFinding>[];
+  findings: SecurityFinding[];
   status: 'secure' | 'warning' | 'critical';
 } {
   const content = module.content;
-  const findings: ReturnType<typeof buildFinding>[] = [];
+  const findings: SecurityFinding[] = [];
 
-  for (const def of SECURITY_PATTERNS) {
+  const moduleLanguage = languageOverride || module.language;
+
+  // Las reglas de SQL se recorren con las demas: comparten el mismo motor de
+  // conteo, severidad y localizacion, y el filtro de languages las mantiene
+  // separadas de las de Javascript.
+  for (const def of [...SECURITY_PATTERNS, ...SQL_RULES]) {
+    // Una regla de JS no debe disparar sobre SQL ni al reves. Sin este filtro,
+    // "service_role" seria critica en cada migracion de Postgres que la menciona.
+    if (def.languages && !def.languages.includes(moduleLanguage)) continue;
+
     // Se cuentan TODAS las apariciones, no solo la primera. Antes un modulo con
     // cinco inyecciones SQL y otro con una daban exactamente el mismo hallazgo.
     const { total, offsets } = matchAll(def.pattern, content);
@@ -845,6 +1023,8 @@ function analyzeModule(
 
   // Score y estado: los calcula scoreOf/statusOf, la MISMA formula que aplica
   // la revision con IA al fusionar sus hallazgos.
+  findings.push(...auditSqlModule(module, idPrefix));
+
   const rawScore = scoreOf(findings);
   const linesAnalyzed = content.split('\n').filter((l) => l.trim().length > 0).length;
 
@@ -1246,7 +1426,8 @@ app.listen(3000);
     filesAnalyzed: analyzedModules.reduce((a, m) => a + (m.fileCount ?? 0), 0),
     totalLines: analysisTarget.split('\n').length,
     findings: dedupedFindings,
-    rulesApplied: SECURITY_PATTERNS.length,
+    rulesApplied: SECURITY_PATTERNS.length + SQL_RULES.length,
+    perLanguage: buildLanguageCoverage(analyzedModules),
   });
 
   // Determinar tamaño de infraestructura según código/descripción

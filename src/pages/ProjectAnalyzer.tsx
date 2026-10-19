@@ -2,6 +2,12 @@ import React, { useState, useRef, useCallback, useMemo } from 'react';
 import JSZip from 'jszip';
 import { useNavigate } from 'react-router-dom';
 import {
+  selectFiles,
+  LANGUAGE_LABEL,
+  type FileSelection,
+  type LoadedFile,
+} from '../lib/file-selection';
+import {
   BrainCircuit,
   ShieldCheck,
   ShieldAlert,
@@ -63,7 +69,11 @@ const IGNORE_DIRS = new Set([
 ]);
 
 const MAX_FILE_BYTES = 200 * 1024; // 200 KB por archivo
-const MAX_TOTAL_CHARS = 400_000;   // límite de texto al API
+
+// MAX_TOTAL_CHARS, LANGUAGE_SHARE y la seleccion de archivos viven en
+// src/lib/file-selection.ts, fuera del componente: es logica pura con una
+// consecuencia importante (que lenguaje se queda sin revisar) y hay que poder
+// comprobarla con la lista real de archivos.
 
 const SEVERITY_CONFIG: Record<
   string,
@@ -216,15 +226,6 @@ function isIgnoredPath(filePath: string): boolean {
   return parts.some((part) => IGNORE_DIRS.has(part));
 }
 
-interface LoadedFile {
-  name: string;
-  path: string;
-  size: number;
-  content: string;
-  skipped?: boolean;
-  skipReason?: string;
-}
-
 async function readFileAsText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -276,35 +277,6 @@ async function extractFilesFromZip(zipFile: File): Promise<LoadedFile[]> {
  * `src/` (y las carpetas de codigo habituales) van primero, y despues el resto
  * en orden alfabetico para que el recorte sea determinista.
  */
-function buildCodeFromFiles(files: LoadedFile[]): string {
-  const included = files.filter((f) => !f.skipped && f.content.trim());
-
-  const rank = (path: string) => {
-    const sourceDirs = ['src/', 'app/', 'lib/', 'pages/', 'components/', 'server/'];
-    const idx = sourceDirs.findIndex((d) => path.startsWith(d) || path.includes(`/${d}`));
-    return idx === -1 ? sourceDirs.length : idx;
-  };
-
-  const ordered = included.slice().sort((a, b) => {
-    const byRank = rank(a.path) - rank(b.path);
-    return byRank !== 0 ? byRank : a.path.localeCompare(b.path);
-  });
-
-  let chars = 0;
-  const parts: string[] = [];
-  for (const file of ordered) {
-    const chunk = `// ===== FILE: ${file.path} =====\n${file.content}`;
-    if (chars + chunk.length > MAX_TOTAL_CHARS) continue;
-    parts.push(chunk);
-    chars += chunk.length;
-  }
-
-  if (parts.length < ordered.length) {
-    parts.push(`// [truncado: ${ordered.length - parts.length} archivos superaron el limite de analisis]`);
-  }
-
-  return parts.join('\n\n');
-}
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
@@ -576,6 +548,8 @@ export const ProjectAnalyzer: React.FC = () => {
    * repetidas conviene poder quedarse solo con los patrones estáticos.
    */
   const [useAiReview, setUseAiReview] = useState(false);
+  /** Último envío real: archivos que entraron y que se quedaron fuera. */
+  const [selection, setSelection] = useState<FileSelection | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -692,11 +666,18 @@ export const ProjectAnalyzer: React.FC = () => {
 
     const lang = language === 'Auto-detectar' ? undefined : language;
     let finalCode = '';
+    // Lo que realmente entra al analizador. Se guarda aparte porque la cuenta
+    // de "archivos listos" no puede decir 172 si solo se envian 118: eso fue
+    // justo lo que hacia indefendible el informe.
+    let selection: FileSelection | null = null;
 
     if (inputMode === 'upload') {
-      finalCode = buildCodeFromFiles(loadedFiles);
+      selection = selectFiles(loadedFiles);
+      finalCode = selection.code;
+      setSelection(selection);
     } else if (inputMode === 'paste') {
       finalCode = code.trim();
+      setSelection(null);
     }
 
     await runProjectAnalysis(projectName.trim(), finalCode, description.trim(), lang, useAiReview);
@@ -715,7 +696,15 @@ export const ProjectAnalyzer: React.FC = () => {
   // ── Derived ──
   const result = projectAnalysis;
   const includedFileCount = loadedFiles.filter((f) => !f.skipped && f.content.trim()).length;
-  const totalCodeChars = buildCodeFromFiles(loadedFiles).length;
+  const preview = selectFiles(loadedFiles);
+  const totalCodeChars = preview.code.length;
+  /**
+   * Lo que REALMENTE se envió, en el último análisis. La cuenta previa al
+   * envío es una estimación optimista: si el proyecto no cabe en el presupuesto,
+   * decir "172 archivos listos" mientras se envían 118 es mentir, y es
+   * precisamente lo que hace indefendible un informe.
+   */
+  const analysed = selection ?? (inputMode === 'upload' ? preview : null);
 
   const allFindings = result
     ? result.modules.flatMap((m) => m.findings).filter((f, i, arr) =>
@@ -1024,11 +1013,36 @@ export const ProjectAnalyzer: React.FC = () => {
                 <>
                   <FileListPreview files={loadedFiles} onRemove={handleRemoveFile} />
                   {includedFileCount > 0 && (
-                    <div className="flex items-center gap-2 p-2.5 rounded-xl bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800">
-                      <CheckCircle2 className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
-                      <p className="text-xs text-blue-700 dark:text-blue-300">
-                        <strong>{includedFileCount}</strong> archivo{includedFileCount !== 1 ? 's' : ''} · ~{(totalCodeChars / 1000).toFixed(0)} KB de código listo para analizar
-                      </p>
+                    <div className="p-2.5 rounded-xl bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                        <p className="text-xs text-blue-700 dark:text-blue-300">
+                          <strong>{analysed ? analysed.sent : includedFileCount}</strong> de{' '}
+                          {includedFileCount} archivo{includedFileCount !== 1 ? 's' : ''} se enviarán
+                          al analizador · ~{(totalCodeChars / 1000).toFixed(0)} KB
+                        </p>
+                      </div>
+                      {/* Reparto por lenguaje: deja de ser invisible que el SQL
+                          se quede sin sitio. */}
+                      {analysed && (
+                        <p className="text-[11px] text-blue-600 dark:text-blue-400 mt-1 ml-6">
+                          {Object.entries(analysed.perLanguage)
+                            .filter(([, n]) => n > 0)
+                            .map(([lang, n]) => `${LANGUAGE_LABEL[lang] ?? lang}: ${n}`)
+                            .join(' · ')}
+                          {analysed.dropped > 0 && (
+                            <span className="text-amber-600 dark:text-amber-400">
+                              {' '}— {analysed.dropped} quedan fuera por el límite
+                            </span>
+                          )}
+                        </p>
+                      )}
+                      {analysed && analysed.dropped > 0 && (
+                        <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1 ml-6">
+                          Los archivos excluidos no se analizan. Sube el límite o quita código
+                          generado para cubrir todo el proyecto.
+                        </p>
+                      )}
                     </div>
                   )}
                 </>
@@ -1145,10 +1159,19 @@ export const ProjectAnalyzer: React.FC = () => {
         )}
       </div>
 
-      {/* ── Results ── */}
-      {result && (
-        <>
-          {/* Score Banner */}
+{/* ── Results ── */}
+        {result && (
+          <>
+            {/* El rotulo va FUERA de la tarjeta. Dentro competia con el titular
+                por el ancho y deformaba el texto del resumen. */}
+            <div className="flex items-center gap-2 mb-2 px-1">
+              <Sparkles className="w-4 h-4 text-blue-500" />
+              <span className="text-[11px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider">
+                Resultado del Análisis
+              </span>
+            </div>
+
+            {/* Score Banner */}
           <div className="bg-gradient-to-r from-[#0F172A] via-[#1E293B] to-[#2563EB]/80 rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden">
             <div className="absolute right-0 top-0 bottom-0 w-1/3 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-blue-400/20 via-transparent to-transparent pointer-events-none" />
             <div className="relative z-10 flex flex-col sm:flex-row sm:items-center gap-6">
@@ -1235,10 +1258,13 @@ export const ProjectAnalyzer: React.FC = () => {
               </div>
 
               <div className="flex-1">
-                <div className="flex items-center gap-2 mb-1">
-                  <Sparkles className="w-4 h-4 text-blue-300" />
-                  <span className="text-xs font-bold text-blue-300 uppercase tracking-wider">Resultado del Análisis IA</span>
-                </div>
+                {/*
+                  El rotulo "Resultado del Analisis IA" sequito de aqui a proposito:
+                  dentro de la tarjeta competia con el titular por el ancho y hacia
+                  que el texto del resumen se partiese en varias lineas desiguales.
+                  Ahora es una etiqueta pequena encima de la tarjeta, que es donde
+                  pertenece.
+                */}
                 <h2 className="text-xl sm:text-2xl font-extrabold mb-2">{result.projectName}</h2>
                 <p className="text-sm text-slate-300 leading-relaxed">{result.summary}</p>
 
@@ -1264,6 +1290,28 @@ export const ProjectAnalyzer: React.FC = () => {
                       </span>
                     ))}
                   </div>
+                )}
+
+                {/* Qué se revisó y qué no: la diferencia entre "no encontré nada" y "no miré". */}
+                {result.coverage?.perLanguage && result.coverage.perLanguage.length > 0 && (
+                  <details className="mt-3 rounded-xl bg-white/5 border border-white/10 px-3 py-2">
+                    <summary className="cursor-pointer text-[11px] text-slate-300">
+                      Qué se revisó, por lenguaje
+                    </summary>
+                    <div className="mt-2 space-y-1">
+                      {result.coverage.perLanguage.map((l) => (
+                        <div key={l.language} className="flex items-baseline gap-2 text-[11px]">
+                          <span className="font-semibold text-slate-200 w-24 shrink-0">
+                            {l.language}
+                          </span>
+                          <span className="text-slate-400">
+                            {l.files} archivos · {l.rules} reglas ·{' '}
+                            {l.vulnerabilities} de {l.detections} detecciones
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
                 )}
 
                 {/* El alcance, en pequeño. Declarar cuantas reglas se aplicaron
