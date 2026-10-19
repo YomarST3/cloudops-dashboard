@@ -303,6 +303,14 @@ export interface ProjectAnalysisResult {
   /** Cuantos hallazgos son recomendaciones y no vulnerabilidades. */
   advisoryCount?: number;
   /**
+   * Hallazgos que la IA detecto pero sin decir en que archivo estan. Se
+   * muestran aparte y NO suman al score ni a los contadores: no hay forma de
+   * comprobarlos. Si entran dentro del titular, el usuario ve una nota baja
+   * por algo que no puede abrir, y eso es justo lo que hace que un informe
+   * parezca poco creible.
+   */
+  unattributedFindingsDetail?: SecurityFinding[];
+  /**
    * Las cifras de cobertura. Opcionales: los analisis anteriores no las traen,
    * y sin ellas la interfaz cae a mostrar solo el indice 0-100.
    */

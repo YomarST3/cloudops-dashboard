@@ -809,12 +809,21 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 }
               }
 
+              // El toast distingue lo verificado de lo que no. Decir solo
+              // "N hallazgos anadidos" hace pensar que los N cuentan, y los que
+              // la IA no localizo no bajan el indice ni el porcentaje de archivos.
+              const sinLocalizar = persisted.coverage?.unattributedFindings ?? 0;
+              const verificados = Math.max(0, review.aiFindingCount - sinLocalizar);
               showToast(
                 review.aiFindingCount > 0 ? 'info' : 'success',
-                `Revisión con IA completada: ${review.aiFindingCount} hallazgos añadidos con ${review.aiModel}. ` +
+                `Revisión con IA completada con ${review.aiModel}: ` +
+                  `${verificados} ${verificados === 1 ? 'hallazgo verificable' : 'hallazgos verificables'}` +
+                  (sinLocalizar > 0
+                    ? ` y ${sinLocalizar} sin archivo localizable (no bajan el índice, pero se muestran aparte).`
+                    : '.') +
                   (persisted.coverage
-                    ? `Ahora ${persisted.coverage.filesWithVulnerabilities} de ${persisted.coverage.filesAnalyzed} archivos tienen una vulnerabilidad.`
-                    : `Nuevo índice de riesgo: ${persisted.overallSecurityScore}/100.`),
+                    ? ` Ahora ${persisted.coverage.filesWithVulnerabilities} de ${persisted.coverage.filesAnalyzed} archivos tienen una vulnerabilidad.`
+                    : ` Nuevo índice de riesgo: ${persisted.overallSecurityScore}/100.`),
                 'Analizador IA'
               );
             }

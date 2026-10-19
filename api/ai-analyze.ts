@@ -230,6 +230,7 @@ const SECURITY_PATTERNS: FindingDef[] = [
     recommendation: 'Implementar middleware de autenticación JWT o Cognito antes de cada endpoint protegido. Usar AWS API Gateway con authorizers.',
     cweId: 'CWE-306',
     pattern: /(?:app\.(?:get|post|put|delete|patch)|router\.(?:get|post|put|delete|patch))\s*\([^)]+\)\s*(?:\n|.){0,30}(?:req\s*,\s*res)/,
+    advisory: true,
   },
   {
     id: 'console-log-sensitive',
@@ -619,8 +620,19 @@ const PENALTIES: Record<'critical' | 'high' | 'medium' | 'low' | 'info', number>
 };
 
 /** Los hallazgos que puntuan son los que son vulnerabilidades. */
-function scored(findings: { advisory?: boolean; severity: keyof typeof PENALTIES }[]) {
-  return findings.filter((f) => !f.advisory);
+/**
+ * Los que mueven el score: ni los consejos de hardening ni los hallazgos de la IA
+ * sin archivo, que no se pueden comprobar. Un hallazgo de REGEX sin archivo si
+ * cuenta: en el modo pegar no hay nombres de archivo, pero el usuario pegó ese
+ * codigo y puede verlo entero.
+ */
+function scored(findings: {
+  advisory?: boolean;
+  severity: keyof typeof PENALTIES;
+  source?: 'regex' | 'ai';
+  file?: string;
+}[]) {
+  return findings.filter((f) => !f.advisory && (f.source !== 'ai' || Boolean(f.file)));
 }
 
 /** Arranca en 100 y descuenta por severidad, sin bajar de 0. */
@@ -704,71 +716,105 @@ const AUTHZ_RE = /\b(authorize|authorization|permission|permissions|role|roles|i
  * Seis controles de cumplimiento. Cada uno mira hallazgos reales (con su
  * localizacion) o señales de código, y explica por qué pasa o falla.
  */
+/**
+ * Los controles se decidian por ID DE PATRON: hit('sql-injection',
+ * 'xss-vulnerability', ...). Eso funciona para los hallazgos estaticos, pero un
+ * hallazgo de la IA tiene un id como `ai-mod0-0-xss`, y el normalize
+ * `replace(/^mod\d+-/, '')` no le quita el prefijo `ai-`. Resultado: NINGUN
+ * hallazgo de la IA podia hacer fallar un control, y el cumplimiento se
+ * mantenia alto con hallazgos criticos abiertos.
+ *
+ * El CWE es lo que ambas capas comparten: lo dice el propio hallazgo y no
+ * depende de que capa lo produjo. Por eso los controles se deciden por CWE.
+ */
+const CONTROL_CWES = {
+  autenticacion: ['CWE-287', 'CWE-306', 'CWE-384'],
+  autorizacion: ['CWE-862', 'CWE-863', 'CWE-639', 'CWE-284', 'CWE-285'],
+  secretos: ['CWE-798', 'CWE-259', 'CWE-321'],
+  cifrado: ['CWE-327', 'CWE-338', 'CWE-916', 'CWE-326'],
+  transporte: ['CWE-319', 'CWE-311'],
+  validacion: ['CWE-89', 'CWE-79', 'CWE-502', 'CWE-1321', 'CWE-601'],
+} satisfies Record<string, string[]>;
+
+type ControlId = keyof typeof CONTROL_CWES;
+
+interface ControlFinding {
+  id: string;
+  cweId?: string;
+  advisory?: boolean;
+  title: string;
+  file?: string;
+  line?: number;
+  affectedModule: string;
+  source?: 'regex' | 'ai';
+}
+
+/**
+ * Un control se puede fallar por dos vias: un hallazgo con el CWE que le
+ * corresponde, o, en autenticacion y autorizacion, por la ausencia de senal
+ * en el codigo. Se mezclan las dos porque las dos son reales: que no haya
+ * comprobacion de permisos es un fallo aunque nadie lo haya detectado.
+ */
 function buildComplianceControls(
   target: string,
-  findings: { id: string; advisory?: boolean; title: string; file?: string; line?: number; affectedModule: string }[]
+  findings: ControlFinding[]
 ): ComplianceControl[] {
+  // Los controles miran TODOS los hallazgos no recomendados,Esteincluding los
+  // que la IA no pudo localizar: un riesgo que nadie puede abrir sigue siendo
+  // un riesgo. Los contadores de severidad y el score, en cambio, solo cuentan
+  // los verificables. Son dos preguntas distintas.
   const real = findings.filter((f) => !f.advisory);
 
-  const hit = (...wanted: string[]): { advisory?: boolean; file?: string; line?: number; affectedModule: string }[] =>
-    real.filter((f) => wanted.includes(f.id.replace(/^mod\d+-/, '')));
+  const byCwe = (control: ControlId) =>
+    real.filter((f) => f.cweId && CONTROL_CWES[control].includes(f.cweId));
 
-  const failsBecause = (list: ReturnType<typeof hit>): string =>
-    list.length === 1
-      ? `Detectado en ${loc(list[0])}.`
-      : `Detectado en ${list.length} sitios, el primero en ${loc(list[0])}.`;
+  const failsBecause = (list: ControlFinding[]): string => {
+    const first = list[0];
+    const where = first.file ? loc(first) : 'sin archivo localizable';
+    const extra = list.length > 1 ? ` y ${list.length - 1} más` : '';
+    return `Detectado ${where}${extra}.`;
+  };
 
   const ok = (): string => 'No se detectó ningún problema de este tipo.';
 
+  const fromCwe = (
+    control: ControlId,
+    label: string,
+    sinCwe: string,
+    /**
+     * Señal de código que hace pasar el control cuando ningún hallazgo lo
+     * marca. Solo tiene sentido en autenticación y autorización, donde la
+     * ausencia de la señal ES el fallo. En secretos, cifrado, transporte o
+     * validación no hay nada que buscar en el texto: si no hay hallazgo, el
+     * control se cumple. Por eso antes de arreglarlo, un proyecto sin una sola
+     * señal de autenticación fallia los seis controles a la vez.
+     */
+    signal?: { re: RegExp; present: string; absent: string }
+  ): ComplianceControl => {
+    const hits = byCwe(control);
+    if (hits.length > 0) {
+      return { id: control, label, passed: false, detail: `${sinCwe} ${failsBecause(hits)}` };
+    }
+    if (!signal) return { id: control, label, passed: true, detail: ok() };
+    const present = signal.re.test(target);
+    return { id: control, label, passed: present, detail: present ? signal.present : signal.absent };
+  };
+
   return [
-    {
-      id: 'autenticacion',
-      label: 'Autenticación',
-      passed: AUTH_RE.test(target),
-      detail: AUTH_RE.test(target)
-        ? 'El código usa algún mecanismo de autenticación (login, JWT o sesión).'
-        : 'No se encontró login, JWT ni gestión de sesiones: cualquiera que alcance la aplicación entra.',
-    },
-    {
-      id: 'autorizacion',
-      label: 'Autorización',
-      passed: AUTHZ_RE.test(target),
-      detail: AUTHZ_RE.test(target)
-        ? 'Hay comprobaciones de permisos o de propiedad del recurso.'
-        : 'No se comprueba quién puede ver cada dato: un usuario autenticado podría leer lo de otro.',
-    },
-    {
-      id: 'secretos',
-      label: 'Gestión de secretos',
-      passed: hit('hardcoded-secret').length === 0,
-      detail: hit('hardcoded-secret').length === 0
-        ? ok()
-        : `Contraseñas o claves escritas en el código. ${failsBecause(hit('hardcoded-secret'))}`,
-    },
-    {
-      id: 'cifrado',
-      label: 'Criptografía',
-      passed: hit('weak-crypto', 'insecure-random').length === 0,
-      detail: hit('weak-crypto', 'insecure-random').length === 0
-        ? ok()
-        : `Algoritmo obsoleto o aleatoriedad no criptográfica. ${failsBecause(hit('weak-crypto', 'insecure-random'))}`,
-    },
-    {
-      id: 'transporte',
-      label: 'Transporte',
-      passed: hit('missing-https').length === 0,
-      detail: hit('missing-https').length === 0
-        ? ok()
-        : `Datos enviados por http:// sin cifrar. ${failsBecause(hit('missing-https'))}`,
-    },
-    {
-      id: 'validacion',
-      label: 'Validación de entrada',
-      passed: hit('sql-injection', 'xss-vulnerability', 'insecure-deserialization', 'prototype-pollution', 'open-redirect').length === 0,
-      detail: hit('sql-injection', 'xss-vulnerability', 'insecure-deserialization', 'prototype-pollution', 'open-redirect').length === 0
-        ? ok()
-        : `Entrada de usuario sin tratar. ${failsBecause(hit('sql-injection', 'xss-vulnerability', 'insecure-deserialization', 'prototype-pollution', 'open-redirect'))}`,
-    },
+    fromCwe('autenticacion', 'Autenticación', 'Falta autenticación en alguna parte del sistema.', {
+      re: AUTH_RE,
+      present: 'El código usa algún mecanismo de autenticación (login, JWT o sesión).',
+      absent: 'No se encontró login, JWT ni gestión de sesiones: cualquiera que alcance la aplicación entra.',
+    }),
+    fromCwe('autorizacion', 'Autorización', 'Falta comprobar quién es el dueño del recurso.', {
+      re: AUTHZ_RE,
+      present: 'Hay comprobaciones de permisos o de propiedad del recurso.',
+      absent: 'No se comprueba quién puede ver cada dato: un usuario autenticado podría leer lo de otro.',
+    }),
+    fromCwe('secretos', 'Gestión de secretos', 'Contraseñas o claves escritas en el código.'),
+    fromCwe('cifrado', 'Criptografía', 'Algoritmo obsoleto o aleatoriedad no criptográfica.'),
+    fromCwe('transporte', 'Transporte', 'Datos enviados por http:// sin cifrar.'),
+    fromCwe('validacion', 'Validación de entrada', 'Entrada de usuario sin tratar.'),
   ];
 }
 
@@ -1446,24 +1492,24 @@ app.listen(3000);
   // Contadores: solo vulnerabilidades. Las recomendaciones se muestran aparte y
   // no restan, o cualquier proyecto real saldria con una carrera de puntos que
   // en realidad son "tienes imports".
-  const vulnFindings = dedupedFindings.filter((f) => !f.advisory);
+  const locatedFindings = dedupedFindings.filter((f) => !f.advisory && f.file);
+  const unattributed = dedupedFindings.filter((f) => !f.advisory && !f.file);
 
   const countBySeverity = (sev: string) =>
-    vulnFindings.filter((f) => f.severity === sev).length;
+    locatedFindings.filter((f) => f.severity === sev).length;
 
   const result = {
     id: `analysis-${Date.now()}`,
     projectName,
     analyzedAt: new Date().toISOString(),
     overallSecurityScore: overallScore,
-    totalFindings: vulnFindings.length,
+    totalFindings: locatedFindings.length,
     criticalFindings: countBySeverity('critical'),
     highFindings: countBySeverity('high'),
     mediumFindings: countBySeverity('medium'),
     lowFindings: countBySeverity('low'),
     modules: analyzedModules,
-    summary: buildSummary(overallScore, countBySeverity('critical'), countBySeverity('high'), vulnFindings.length),
-
+    summary: buildSummary(overallScore, countBySeverity('critical'), countBySeverity('high'), locatedFindings.length),
     infrastructureSize: infraSize,
     recommendedServices,
     estimatedTotalMonthlyCost: Math.round(totalMonthly * 100) / 100,
@@ -1472,6 +1518,7 @@ app.listen(3000);
     complianceControls,
     scoreBreakdown,
     advisoryCount,
+    unattributedFindingsDetail: unattributed,
     coverage,
     inputType,
     languages,

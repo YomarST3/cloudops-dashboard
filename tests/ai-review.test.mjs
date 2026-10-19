@@ -183,7 +183,7 @@ const dupBody = (cwes) => ({
         text: JSON.stringify({
           findings: cwes.map((c, i) => ({
             severity: 'high', category: `Cat${i}`, title: `IA ${c}`,
-            description: 'd', recommendation: 'r', cweId: c,
+            description: 'd', recommendation: 'r', cweId: c, lineHint: 'app/src/x.js:5',
           })),
         }),
       }],

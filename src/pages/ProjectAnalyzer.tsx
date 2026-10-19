@@ -1368,16 +1368,31 @@ export const ProjectAnalyzer: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="bg-white dark:bg-[#1E293B] border border-[#E2E8F0] dark:border-[#334155] rounded-2xl p-5 shadow-sm">
               <div className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2 flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-blue-500" /> Controles de Cumplimiento
+                <ShieldCheck className="w-4 h-4 text-blue-500" /> Controles presentes
               </div>
-              <div className={`text-3xl font-extrabold ${scoreColor(result.complianceScore)}`}>
-                {result.complianceScore}%
-              </div>
+              {/*
+                El porcentaje ya no es el titular. "83%" al lado de tres
+                vulnerabilidades se leia como una nota final, y no lo es: mide
+                cuántos controles existen en el código, no si el proyecto está
+                limpio. Ahora manda "5 de 6" y el porcentaje queda pequeño.
+              */}
               {result.complianceControls ? (
                 <>
-                  <p className="text-xs text-slate-500 mt-1 mb-2">
+                  <div className={`text-3xl font-extrabold ${scoreColor(result.complianceScore)}`}>
                     {result.complianceControls.filter((c) => c.passed).length} de{' '}
-                    {result.complianceControls.length} controles implementados
+                    {result.complianceControls.length}
+                  </div>
+                  <p className="text-xs text-slate-500 mt-1 mb-2">
+                    controles implementados · {result.complianceScore}%
+                  </p>
+                  <p className="text-xs text-slate-600 dark:text-slate-300 mb-2 pb-2 border-b border-slate-200 dark:border-slate-700">
+                    Vulnerabilidades abiertas:{' '}
+                    <strong className="text-slate-800 dark:text-white">
+                      {result.totalFindings}
+                    </strong>{' '}
+                    {result.coverage
+                      ? `en ${result.coverage.filesWithVulnerabilities} de ${result.coverage.filesAnalyzed} archivos`
+                      : ''}
                   </p>
                   <ul className="space-y-1.5">
                     {result.complianceControls.map((c) => (
@@ -1481,6 +1496,51 @@ export const ProjectAnalyzer: React.FC = () => {
                           </li>
                         ))}
                       </ul>
+                    </div>
+                  </details>
+                )}
+
+                {/* Los que la IA detectó pero no localizó. No se pueden comprobar, así que no
+                    suman al score ni a los contadores: bajarlos sería castigar
+                    por algo que el usuario no puede abrir. */}
+                {result.unattributedFindingsDetail && result.unattributedFindingsDetail.length > 0 && (
+                  <details className="bg-amber-50 dark:bg-amber-950/20 border border-amber-300 dark:border-amber-800 rounded-2xl overflow-hidden">
+                    <summary className="px-5 py-3 cursor-pointer text-xs font-bold uppercase tracking-wider text-amber-700 dark:text-amber-300 flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4" />
+                      Sin archivo localizable ({result.unattributedFindingsDetail.length}) — no
+                      cuentan en el puntaje
+                    </summary>
+                    <div className="px-5 pb-4 space-y-2">
+                      <p className="text-xs text-amber-800 dark:text-amber-300/90">
+                        La IA los detectó pero no indicó en qué archivo están. Sin esa
+                        referencia no hay forma de abrirlos ni comprobarlos, así que quedan
+                        fuera del puntaje y de los contadores. Los controles de cumplimiento
+                        sí los tienen en cuenta: son un riesgo real aunque no se pueda abrir
+                        el archivo.
+                      </p>
+                      {result.unattributedFindingsDetail.map((f) => (
+                        <div
+                          key={f.id}
+                          className="flex items-start gap-2 p-3 rounded-xl border border-amber-200 dark:border-amber-900/60"
+                        >
+                          <span className="text-[10px] font-mono font-bold text-amber-700 dark:text-amber-400 shrink-0 mt-0.5">
+                            {(SEVERITY_CONFIG[f.severity] ?? SEVERITY_CONFIG.info).label}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="text-xs font-semibold text-slate-800 dark:text-slate-100">
+                              {f.title}
+                              {f.cweId && (
+                                <span className="ml-2 text-[10px] font-mono text-slate-400">
+                                  {f.cweId}
+                                </span>
+                              )}
+                            </p>
+                            <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                              {f.description}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </details>
                 )}

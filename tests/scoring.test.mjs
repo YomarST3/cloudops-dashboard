@@ -110,6 +110,10 @@ const iaFinding = {
   description: 'd',
   recommendation: 'r',
   affectedModule: base.modules[0].moduleName,
+  // Con archivo y línea: un hallazgo de la IA sin localizar no mueve el score,
+  // y esta prueba es del cálculo, no de la localización.
+  file: 'app/db.js',
+  line: 2,
   cweId: 'CWE-862',
   source: 'ai',
 };

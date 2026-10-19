@@ -47,7 +47,8 @@ const fusionado = applyAiFindings(
 
 const c = fusionado.coverage;
 check('el hallazgo sin archivo se contabiliza aparte', c?.unattributedFindings === 1, String(c?.unattributedFindings));
-check('y sigue contando en el total de hallazgos', fusionado.totalFindings === 2, String(fusionado.totalFindings));
+check('el hallazgo sin archivo NO cuenta en el total de hallazgos',
+  fusionado.totalFindings === 1, String(fusionado.totalFindings));
 check(
   'el porcentaje NO lo cuenta como archivo afectado',
   c?.filesWithVulnerabilities === 1 && c?.vulnerabilityFileRate === 50,
@@ -64,10 +65,18 @@ const soloSinLocalizar = applyAiFindings(
   'export const ok = 1;'
 );
 
+// Con la regla nueva este caso YA NO puede ser una contradiccion: el hallazgo
+// sin localizar no entra en el total, asi que no hay forma de ver a la vez
+// "0% de los archivos" y "1 hallazgo" en el titular. Queda contabilizado aparte.
 const c2 = soloSinLocalizar.coverage;
-const tituldebeSerAmbar = soloSinLocalizar.totalFindings === 1 && c2?.filesWithVulnerabilities === 0;
-check('el caso "0 archivos y 1 hallazgo" es detectable como tal', tituldebeSerAmbar,
-  `total=${soloSinLocalizar.totalFindings} archivosConVuln=${c2?.filesWithVulnerabilities} sinLocalizar=${c2?.unattributedFindings}`);
+check(
+  'el caso "0 archivos y 1 hallazgo" ya no puede contradecirse',
+  soloSinLocalizar.totalFindings === 0 && c2?.filesWithVulnerabilities === 0,
+  `total=${soloSinLocalizar.totalFindings} archivosConVuln=${c2?.filesWithVulnerabilities}`
+);
+check('queda registrado aparte para que la interfaz lo muestre',
+  (soloSinLocalizar.unattributedFindingsDetail?.length ?? 0) === 1,
+  String(soloSinLocalizar.unattributedFindingsDetail?.length));
 check('y hay sin-localizar para que la interfaz lo explique', (c2?.unattributedFindings ?? 0) === 1,
   String(c2?.unattributedFindings));
 

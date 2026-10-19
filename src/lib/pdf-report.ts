@@ -637,6 +637,58 @@ export async function generateAnalysisReportPdf(
     y = tableEndY(doc, y) + 10;
   }
 
+  // Lo que la IA detecto pero sin archivo ni linea. Va aparte porque NO es
+  // verificable: no baja el puntaje ni entra en el porcentaje de archivos, pero
+  // si puede hacer fallar un control de cumplimiento. Ocultarlo seria mentir
+  // sobre el alcance del analisis.
+  const sinLocalizar = result.unattributedFindingsDetail ?? [];
+  if (sinLocalizar.length > 0) {
+    if (y > CONTENT_BOTTOM - 40) {
+      doc.addPage();
+      y = CONTENT_TOP;
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11.5);
+    doc.setTextColor(...BRAND_DARK);
+    doc.text('7. DETECTADO SIN ARCHIVO LOCALIZABLE', MARGIN, y);
+    y += 7;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.5);
+    doc.setTextColor(...MUTED);
+    const rationale =
+      'La revision con IA detecto algo que no pudo localizar en un archivo concreto, asi que no se puede verificar ni contar como vulnerabilidad. Se listan para que la revision sea completa y no se oculten detras de las cifras.';
+    doc.text(rationale, MARGIN, y, { maxWidth: CONTENT_W });
+    y += 12;
+
+    autoTable(doc, {
+      startY: y,
+      head: [['Hallazgo', 'CWE', 'Por que']],
+      body: sinLocalizar.map<RowInput>((f) => [f.title, f.cweId ?? '-', f.description]),
+      theme: 'grid',
+      headStyles: { fillColor: BRAND_DARK, textColor: 255, fontStyle: 'bold', fontSize: 8 },
+      // 'linebreak' y no 'ellipsize': un hallazgo sin verificar puede tener un
+      // motivo largo, y recortarlo dejaria al lector sin la razon por la que la
+      // IA no pudo localizarlo.
+      styles: {
+        fontSize: 7.8,
+        cellPadding: 1.8,
+        textColor: BODY,
+        lineColor: HAIRLINE,
+        overflow: 'linebreak',
+      },
+      columnStyles: {
+        // El hallazgo y su motivo van enteros: recortarlos dejaria al lector sin
+        // la informacion que explica por que el hallazgo no se pudo verificar.
+        0: { cellWidth: 62, overflow: 'linebreak' },
+        1: { cellWidth: 22 },
+        2: { cellWidth: 98, overflow: 'linebreak' },
+      },
+      margin: { left: MARGIN, right: MARGIN },
+    });
+    y = tableEndY(doc, y) + 10;
+  }
+
   // ── 7. Detalle por modulo ─────────────────────────────────────────────────
   doc.addPage();
   y = CONTENT_TOP;
