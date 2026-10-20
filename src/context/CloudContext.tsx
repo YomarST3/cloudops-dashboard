@@ -206,14 +206,16 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     detectUserOrigin();
   }, [detectUserOrigin]);
 
-  // Proposals State
+  // Proposals State. Con sesion, el estado inicial va vacio: la BD es la fuente
+  // de verdad y una cuenta nueva debe arrancar en cero, sin datos de ejemplo.
+  // Los datos simulados de src/data/*.ts son el estado de arranque del modo local.
   const [proposals, setProposals] = useState<CloudProposal[]>(() =>
-    readJsonCache(scopedKey(LOCAL_STORAGE_PROPOSALS_KEY, userId), INITIAL_PROPOSALS)
+    readJsonCache(scopedKey(LOCAL_STORAGE_PROPOSALS_KEY, userId), userId ? [] : INITIAL_PROPOSALS)
   );
 
   // Costs State
   const [costItems, setCostItems] = useState<CostItem[]>(() =>
-    readJsonCache(scopedKey(LOCAL_STORAGE_COSTS_KEY, userId), INITIAL_COST_ITEMS)
+    readJsonCache(scopedKey(LOCAL_STORAGE_COSTS_KEY, userId), userId ? [] : INITIAL_COST_ITEMS)
   );
 
   // Dark Mode State
@@ -319,33 +321,6 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }, 4500);
   }, [removeToast]);
 
-  // ─── Siembra inicial ───────────────────────────────────────────────────────
-
-  /** Siembra costos y propuestas de arranque, y marca `seeded_at`. */
-  const seedInitialData = async (uid: string) => {
-    const seededCosts: CostItem[] = INITIAL_COST_ITEMS.map((item) => ({ ...item, id: newId() }));
-    const seededProposals: CloudProposal[] = INITIAL_PROPOSALS.map((prop) => ({ ...prop, id: newId() }));
-
-    const { error } = await supabase
-      .from('user_preferences')
-      .upsert({ user_id: uid, seeded_at: new Date().toISOString() }, { onConflict: 'user_id' });
-
-    if (error) throw new Error(error.message);
-
-    if (seededProposals.length > 0) {
-      const { error: propError } = await supabase
-        .from('proposals')
-        .insert(seededProposals.map((prop) => toProposalInsert(prop, uid)));
-      if (propError) throw new Error(propError.message);
-    }
-    if (seededCosts.length > 0) {
-      const { error: costError } = await supabase
-        .from('cost_items')
-        .insert(seededCosts.map((item) => toCostItemInsert(item, uid)));
-      if (costError) throw new Error(costError.message);
-    }
-  };
-
   // ─── Carga inicial: cache local + Supabase ─────────────────────────────────
 
   useEffect(() => {
@@ -375,17 +350,14 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const nextCosts = (costsRes.data as CostItemRow[] | null)?.map(toCostItem) ?? [];
         const nextAnalysis = (analysisRes.data as ProjectAnalysisRow[] | null)?.[0];
 
-        // Primer ingreso: sembramos los datos de arranque desde src/data/*.ts.
-        // `seeded_at` evita reinsertarlos si el usuario los borra a proposito.
         const prefs = prefsRes.data;
-        if (!prefs?.seeded_at && nextCosts.length === 0 && nextProposals.length === 0) {
-          if (cancelled) return;
-          await seedInitialData(userId);
-          if (cancelled) return;
-        }
 
-        setProposals(nextProposals.length > 0 ? nextProposals : INITIAL_PROPOSALS);
-        setCostItems(nextCosts.length > 0 ? nextCosts : INITIAL_COST_ITEMS);
+        // Una cuenta nueva arranca en cero: nada de propuestas ni costos de
+        // ejemplo. Los datos simulados de src/data/*.ts son solo el estado
+        // inicial del modo local (sin Supabase); en la nube cada usuario parte
+        // vacio y solo ve lo que el mismo crea.
+        setProposals(nextProposals);
+        setCostItems(nextCosts);
         setProjectAnalysis(nextAnalysis ? toProjectAnalysis(nextAnalysis) : null);
 
         if (prefs) {
