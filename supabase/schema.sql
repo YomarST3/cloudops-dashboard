@@ -43,6 +43,9 @@ CREATE TYPE public.theme_preference AS ENUM (
 CREATE TABLE public.profiles (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   display_name TEXT,
+  role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'superadmin')),
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  email TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -54,6 +57,28 @@ CREATE POLICY "Own profile insert" ON public.profiles
   FOR INSERT TO authenticated WITH CHECK (auth.uid() = id);
 CREATE POLICY "Own profile update" ON public.profiles
   FOR UPDATE TO authenticated USING (auth.uid() = id);
+
+-- 20261020000000_superadmin_users.sql
+-- El superadmin es un usuario con profiles.role = 'superadmin' (se marca a mano).
+-- is_superadmin() es SECURITY DEFINER para leer profiles sin recursion de RLS.
+CREATE OR REPLACE FUNCTION public.is_superadmin()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.profiles
+    WHERE id = auth.uid() AND role = 'superadmin'
+  );
+$$;
+
+CREATE POLICY "Superadmin read profiles" ON public.profiles
+  FOR SELECT TO authenticated USING (public.is_superadmin());
+CREATE POLICY "Superadmin update profiles" ON public.profiles
+  FOR UPDATE TO authenticated
+  USING (public.is_superadmin()) WITH CHECK (public.is_superadmin());
 
 GRANT SELECT, INSERT, UPDATE ON public.profiles TO authenticated;
 
@@ -83,6 +108,10 @@ CREATE POLICY "Own proposals" ON public.proposals
   FOR ALL TO authenticated
   USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
 
+CREATE POLICY "Superadmin all proposals" ON public.proposals
+  FOR ALL TO authenticated
+  USING (public.is_superadmin()) WITH CHECK (public.is_superadmin());
+
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.proposals TO authenticated;
 
 -- ─── cost_items ───────────────────────────────────────────────────────────────
@@ -110,6 +139,10 @@ CREATE POLICY "Own cost items" ON public.cost_items
   FOR ALL TO authenticated
   USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
 
+CREATE POLICY "Superadmin all cost items" ON public.cost_items
+  FOR ALL TO authenticated
+  USING (public.is_superadmin()) WITH CHECK (public.is_superadmin());
+
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.cost_items TO authenticated;
 
 -- ─── project_analyses ─────────────────────────────────────────────────────────
@@ -135,6 +168,10 @@ CREATE POLICY "Own project analyses" ON public.project_analyses
   FOR ALL TO authenticated
   USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
 
+CREATE POLICY "Superadmin all project analyses" ON public.project_analyses
+  FOR ALL TO authenticated
+  USING (public.is_superadmin()) WITH CHECK (public.is_superadmin());
+
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.project_analyses TO authenticated;
 
 -- ─── user_preferences ─────────────────────────────────────────────────────────
@@ -157,6 +194,10 @@ CREATE POLICY "Own preferences" ON public.user_preferences
   FOR ALL TO authenticated
   USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
 
+CREATE POLICY "Superadmin all preferences" ON public.user_preferences
+  FOR ALL TO authenticated
+  USING (public.is_superadmin()) WITH CHECK (public.is_superadmin());
+
 GRANT SELECT, INSERT, UPDATE ON public.user_preferences TO authenticated;
 
 -- ─── Triggers ─────────────────────────────────────────────────────────────────
@@ -171,9 +212,9 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
 BEGIN
-  INSERT INTO public.profiles (id, display_name)
-  VALUES (NEW.id, COALESCE(NEW.raw_user_meta_data ->> 'full_name', split_part(NEW.email, '@', 1)))
-  ON CONFLICT (id) DO NOTHING;
+  INSERT INTO public.profiles (id, display_name, email)
+  VALUES (NEW.id, COALESCE(NEW.raw_user_meta_data ->> 'full_name', split_part(NEW.email, '@', 1)), NEW.email)
+  ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email;
 
   INSERT INTO public.user_preferences (user_id)
   VALUES (NEW.id)

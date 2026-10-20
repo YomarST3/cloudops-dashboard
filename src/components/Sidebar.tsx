@@ -12,9 +12,11 @@ import {
   FileText,
   X,
   Cloud,
-  BrainCircuit
+  BrainCircuit,
+  ShieldCheck as ShieldCheckIcon
 } from 'lucide-react';
 import { useCloud } from '../context/CloudContext';
+import { useAuth } from '../hooks/useAuth';
 import { computeSecurityScore } from '../lib/liveMetrics';
 import { WORKLOAD_PILLARS } from '../data/reports';
 
@@ -25,6 +27,7 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
   const location = useLocation();
+  const { isSuperadmin } = useAuth();
   const {
     proposals,
     costItems,
@@ -114,6 +117,16 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
       badge: reportGrade
     }
   ];
+
+  // Solo los superadmins ven el panel de administracion.
+  if (isSuperadmin) {
+    navItems.push({
+      name: 'Administración',
+      path: '/admin',
+      icon: ShieldCheckIcon,
+      badge: 'Admin'
+    });
+  }
 
   return (
     <>

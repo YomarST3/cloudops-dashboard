@@ -139,6 +139,13 @@ const LOCAL_STORAGE_REGION_KEY = 'cloudops_region_v1';
 const LOCAL_STORAGE_THEME_KEY = 'cloudops_theme_v1';
 const LOCAL_STORAGE_ANALYSIS_KEY = 'cloudops_ai_analysis_v1';
 
+/**
+ * Sufijo de cache por usuario. Se usa tanto al leer el estado inicial (antes de
+ * que exista `cacheKey`) como al escribir, para que dos cuentas en el mismo
+ * navegador jamas se vean los borradores de la otra.
+ */
+const scopedKey = (base: string, userId: string | null) => (userId ? `${base}:${userId}` : base);
+
 /** Los ids deben ser UUID: las columnas PK de Supabase los rechazan si no. */
 const newId = (): string => crypto.randomUUID();
 
@@ -166,13 +173,13 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
    * navegador, una no debe ver el borrador cacheado de la otra.
    */
   const cacheKey = useCallback(
-    (base: string) => (userId ? `${base}:${userId}` : base),
+    (base: string) => scopedKey(base, userId),
     [userId]
   );
 
   // Region State
   const [selectedRegionCode, setSelectedRegionCodeState] = useState<string>(() => {
-    return localStorage.getItem(LOCAL_STORAGE_REGION_KEY) || 'us-east-1';
+    return localStorage.getItem(scopedKey(LOCAL_STORAGE_REGION_KEY, userId)) || 'us-east-1';
   });
 
   // Map origin (user location used as the source of latency arcs)
@@ -201,12 +208,12 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // Proposals State
   const [proposals, setProposals] = useState<CloudProposal[]>(() =>
-    readJsonCache(LOCAL_STORAGE_PROPOSALS_KEY, INITIAL_PROPOSALS)
+    readJsonCache(scopedKey(LOCAL_STORAGE_PROPOSALS_KEY, userId), INITIAL_PROPOSALS)
   );
 
   // Costs State
   const [costItems, setCostItems] = useState<CostItem[]>(() =>
-    readJsonCache(LOCAL_STORAGE_COSTS_KEY, INITIAL_COST_ITEMS)
+    readJsonCache(scopedKey(LOCAL_STORAGE_COSTS_KEY, userId), INITIAL_COST_ITEMS)
   );
 
   // Dark Mode State
@@ -253,7 +260,7 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // AI Analysis state
   const [projectAnalysis, setProjectAnalysis] = useState<ProjectAnalysisResult | null>(() =>
-    readJsonCache<ProjectAnalysisResult | null>(LOCAL_STORAGE_ANALYSIS_KEY, null)
+    readJsonCache<ProjectAnalysisResult | null>(scopedKey(LOCAL_STORAGE_ANALYSIS_KEY, userId), null)
   );
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   /**
@@ -349,9 +356,9 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setIsSyncing(true);
       try {
         const [proposalsRes, costsRes, analysisRes, prefsRes] = await Promise.all([
-          supabase.from('proposals').select('*').order('inserted_at', { ascending: false }),
-          supabase.from('cost_items').select('*').order('inserted_at', { ascending: true }),
-          supabase.from('project_analyses').select('*').order('analyzed_at', { ascending: false }).limit(1),
+          supabase.from('proposals').select('*').eq('user_id', userId).order('inserted_at', { ascending: false }),
+          supabase.from('cost_items').select('*').eq('user_id', userId).order('inserted_at', { ascending: true }),
+          supabase.from('project_analyses').select('*').eq('user_id', userId).order('analyzed_at', { ascending: false }).limit(1),
           supabase.from('user_preferences').select('*').eq('user_id', userId).maybeSingle(),
         ]);
 
@@ -444,11 +451,11 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const setSelectedRegionCode = useCallback(
     (code: string) => {
       setSelectedRegionCodeState(code);
-      localStorage.setItem(LOCAL_STORAGE_REGION_KEY, code);
+      localStorage.setItem(cacheKey(LOCAL_STORAGE_REGION_KEY), code);
       const regionObj = AWS_REGIONS.find((r) => r.code === code);
       showToast('info', `Región activa cambiada a ${regionObj?.name || code}`, 'Infraestructura Global');
     },
-    [showToast]
+    [cacheKey, showToast]
   );
 
   const toggleDarkMode = () => {
@@ -803,7 +810,8 @@ export const CloudProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 const { error } = await supabase
                   .from('project_analyses')
                   .update(toProjectAnalysisUpdate(persisted))
-                  .eq('id', persisted.id);
+                  .eq('id', persisted.id)
+                  .eq('user_id', uid!);
                 if (error) {
                   showToast('warning', `No se pudo actualizar el análisis con la IA: ${error.message}`, 'Analizador IA');
                 }

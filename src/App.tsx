@@ -21,6 +21,7 @@ import { Services } from './pages/Services';
 import { Monitoring } from './pages/Monitoring';
 import { Reports } from './pages/Reports';
 import { ProjectAnalyzer } from './pages/ProjectAnalyzer';
+import { AdminUsers } from './pages/AdminUsers';
 
 const FullScreenLoader: React.FC = () => (
   <div className="min-h-screen bg-[#F8FAFC] dark:bg-[#0B1120] flex flex-col items-center justify-center gap-4 text-[#64748B] dark:text-slate-400 font-sans">
@@ -68,6 +69,7 @@ const AppLayout: React.FC = () => {
             <Route path="/monitoring" element={<Monitoring />} />
             <Route path="/reports" element={<Reports />} />
             <Route path="/project-analyzer" element={<ProjectAnalyzer />} />
+            <Route path="/admin" element={<AdminUsers />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </main>

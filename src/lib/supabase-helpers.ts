@@ -71,6 +71,24 @@ export const toProposal = (row: ProposalRow): CloudProposal => ({
 export const toProjectAnalysis = (row: ProjectAnalysisRow): ProjectAnalysisResult =>
   row.payload as unknown as ProjectAnalysisResult;
 
+export interface ProfileSummary {
+  id: string;
+  displayName: string | null;
+  email: string | null;
+  role: 'user' | 'superadmin';
+  isActive: boolean;
+  createdAt: string;
+}
+
+export const toProfileSummary = (row: ProfileRow): ProfileSummary => ({
+  id: row.id,
+  displayName: row.display_name,
+  email: row.email,
+  role: row.role === 'superadmin' ? 'superadmin' : 'user',
+  isActive: row.is_active,
+  createdAt: row.created_at,
+});
+
 export const toUserOrigin = (origin: unknown): UserOrigin | null => {
   if (!origin || typeof origin !== 'object') return null;
   const candidate = origin as Partial<UserOrigin>;

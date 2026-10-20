@@ -233,3 +233,27 @@ export async function fetchGitHubProject(url: string): Promise<GitHubFetchRespon
   return parseJsonOrThrow<GitHubFetchResponse>(response, '/api/github-fetch');
 }
 
+/**
+ * Elimina una cuenta de forma real (borra el usuario de auth.users via Admin
+ * API). Requiere el access token del superadmin: el servidor lo usa para
+ * verificar permisos antes de tocar nada.
+ */
+export async function adminDeleteUser(
+  userId: string,
+  accessToken: string
+): Promise<{ deleted?: boolean; error?: string }> {
+  const response = await fetch('/api/admin-delete-user', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ userId }),
+    signal: AbortSignal.timeout(30000),
+  });
+  return parseJsonOrThrow<{ deleted?: boolean; error?: string }>(
+    response,
+    '/api/admin-delete-user'
+  );
+}
+

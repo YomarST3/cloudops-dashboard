@@ -1,15 +1,12 @@
 import React, { useState } from 'react';
-import { LogOut, User, Database, ChevronDown, Loader2 } from 'lucide-react';
+import { LogOut, ChevronDown, Loader2 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
-import { useCloud } from '../context/CloudContext';
 
 /**
- * Menu de usuario del Header: identidad real de Supabase y estado de la
- * persistencia (Supabase vs cache local).
+ * Menu de usuario del Header: identidad real de la sesion y cierre de sesion.
  */
 export const UserMenu: React.FC = () => {
   const { user, signOut } = useAuth();
-  const { isRemoteEnabled, isSyncing } = useCloud();
 
   const [isOpen, setIsOpen] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
@@ -41,9 +38,6 @@ export const UserMenu: React.FC = () => {
           <span className="text-xs font-semibold text-slate-800 dark:text-slate-200 block leading-tight max-w-[10rem] truncate">
             {email || 'Sesión local'}
           </span>
-          <span className="text-[10px] text-slate-400 block leading-tight">
-            {isRemoteEnabled ? 'Datos en Supabase' : 'Modo local'}
-          </span>
         </div>
         <ChevronDown className="w-3.5 h-3.5 text-slate-400 hidden md:block" />
       </button>
@@ -59,35 +53,6 @@ export const UserMenu: React.FC = () => {
               <p className="text-sm font-semibold text-slate-800 dark:text-slate-100 mt-1 truncate">
                 {email || 'Sin cuenta (modo local)'}
               </p>
-            </div>
-
-            {/* Estado de persistencia */}
-            <div className="px-3 py-2.5 border-b border-slate-100 dark:border-slate-800 flex items-start gap-2.5">
-              {isRemoteEnabled ? (
-                <>
-                  <Database className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">
-                      Sincronizado con Supabase
-                    </p>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                      {isSyncing ? 'Sincronizando…' : 'Tus datos están guardados y aislados por RLS.'}
-                    </p>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <User className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">
-                      Modo local
-                    </p>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                      Sin sesión o sin variables de entorno: se guarda en localStorage.
-                    </p>
-                  </div>
-                </>
-              )}
             </div>
 
             {user && (

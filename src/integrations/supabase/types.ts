@@ -8,17 +8,26 @@ export type Database = {
         Row: {
           created_at: string;
           display_name: string | null;
+          email: string | null;
           id: string;
+          is_active: boolean;
+          role: string;
         };
         Insert: {
           created_at?: string;
           display_name?: string | null;
+          email?: string | null;
           id: string;
+          is_active?: boolean;
+          role?: string;
         };
         Update: {
           created_at?: string;
           display_name?: string | null;
+          email?: string | null;
           id?: string;
+          is_active?: boolean;
+          role?: string;
         };
         Relationships: [];
       };
