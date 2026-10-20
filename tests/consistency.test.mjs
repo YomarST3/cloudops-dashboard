@@ -122,14 +122,24 @@ const medio = analyzeCode({
 check('rama >=85 con 1 hallazgo dice "1 observación menor"',
   /Se detectaron 1 observación menor/.test(medio.summary), medio.summary);
 
-// Rama >=60 (uno crítico resta 25 -> 75): "1 hallazgo crítico/alto"
+// Rama >=60 (un hallazgo alto resta 25 -> 75): "1 hallazgo crítico/alto".
+// Un crítico ahora resta 50 (score 50) y cae en la rama grave, asi que para
+// llegar a esta rama se necesita un hallazgo de severidad alta, no crítica.
+const alto = analyzeCode({
+  projectName: 'app',
+  code: f('app/src/a.js', 'eval(req.body.code);'),
+});
+check('rama >=60 con 1 hallazgo dice "1 hallazgo crítico/alto"',
+  /Se identificaron 1 hallazgo crítico\/alto/.test(alto.summary), alto.summary);
+check('y nunca "1 hallazgos"', !/1 hallazgos/.test(alto.summary));
+
+// Un crítico (resta 50 -> score 50) cae en la rama grave, sin ambigüedad.
 const critico = analyzeCode({
   projectName: 'app',
   code: f('app/src/a.js', "const password = 'Panaderia2024!';"),
 });
-check('rama >=60 con 1 hallazgo dice "1 hallazgo crítico/alto"',
-  /Se identificaron 1 hallazgo crítico\/alto/.test(critico.summary), critico.summary);
-check('y nunca "1 hallazgos"', !/1 hallazgos/.test(critico.summary));
+check('un crítico baja a la rama grave',
+  /presenta vulnerabilidades serias/.test(critico.summary), critico.summary);
 
 // Varios hallazgos en la misma rama.
 const varios = analyzeCode({

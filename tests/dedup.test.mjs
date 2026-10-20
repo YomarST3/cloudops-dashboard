@@ -48,9 +48,9 @@ check('y los DOS archivos cuentan como afectados',
   dosArchivos.coverage.filesWithVulnerabilities === 2,
   String(dosArchivos.coverage.filesWithVulnerabilities));
 
-// La primera aparicion resta 25 (critico); la repeticion, 5.
-check('el score aplica la penalidad completa una sola vez (25 + 5)',
-  dosArchivos.overallSecurityScore === 70,
+// La primera aparicion resta 50 (critico); la repeticion, 5.
+check('el score aplica la penalidad completa una sola vez (50 + 5)',
+  dosArchivos.overallSecurityScore === 45,
   `score=${dosArchivos.overallSecurityScore} restas=${sumaRestas(dosArchivos)}`);
 
 check('la tabla por lenguaje suma lo MISMO que el titular',
@@ -81,7 +81,7 @@ const mezcla = analyzeCode({
   ].join('\n'),
 });
 check('la recomendacion no tapa el hallazgo real de otro archivo',
-  mezcla.totalFindings === 1 && mezcla.overallSecurityScore === 75,
+  mezcla.totalFindings === 1 && mezcla.overallSecurityScore === 50,
   `total=${mezcla.totalFindings} score=${mezcla.overallSecurityScore}`);
 check('y esa recomendacion sigue contando como tal, no desaparece',
   mezcla.advisoryCount >= 1, String(mezcla.advisoryCount));
@@ -91,8 +91,8 @@ const cinco = [1, 2, 3, 4, 5]
   .map((i) => f(`src/archivo${i}.js`, `const password = "${REAL_1}";`))
   .join('\n');
 const muchas = analyzeCode({ projectName: 'p', code: cinco });
-check('cinco archivos con el mismo critico dan 25 + 4x5 = 45, no 0',
-  muchas.overallSecurityScore === 55,
+check('cinco archivos con el mismo critico dan 50 + 4x5 = 70, no 0',
+  muchas.overallSecurityScore === 30,
   `score=${muchas.overallSecurityScore} restas=${sumaRestas(muchas)}`);
 check('y siguen contando cinco archivos afectados',
   muchas.coverage.filesWithVulnerabilities === 5,

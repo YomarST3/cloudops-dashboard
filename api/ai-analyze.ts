@@ -612,8 +612,8 @@ function guessLanguageFromContent(code: string): string {
 // ese mismo puntaje tras anadir sus hallazgos.
 
 const PENALTIES: Record<'critical' | 'high' | 'medium' | 'low' | 'info', number> = {
-  critical: 25,
-  high: 15,
+  critical: 50,
+  high: 25,
   medium: 8,
   low: 3,
   info: 1,
@@ -802,7 +802,7 @@ function scoreProject<
 /**
  * Etiqueta del desglose. Cuando un hallazgo abarca varios archivos hay que
  * decirlo: la suma de la linea (varias veces la penalidad) no coincidiria con
- * un relato de "un problema, 25 puntos".
+ * un relato de "un problema, 50 puntos".
  */
 function firstLabel(
   f: { title: string; severity: keyof typeof PENALTIES; file?: string; line?: number; affectedModule: string },
