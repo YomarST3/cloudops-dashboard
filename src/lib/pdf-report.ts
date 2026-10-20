@@ -702,13 +702,13 @@ export async function generateAnalysisReportPdf(
     y = tableEndY(doc, y) + 10;
   }
 
-  // ── 7. Detalle por modulo ─────────────────────────────────────────────────
+  // ── 9. Detalle por modulo ─────────────────────────────────────────────────
   doc.addPage();
   y = CONTENT_TOP;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(11.5);
   doc.setTextColor(...BRAND_DARK);
-  doc.text('7. DETALLE POR MODULO Y REMEDIACION', MARGIN, y);
+  doc.text('8. DETALLE POR MODULO Y REMEDIACION', MARGIN, y);
   y += 7;
 
   const FINDING_INDENT = MARGIN + 5;
@@ -856,7 +856,7 @@ export async function generateAnalysisReportPdf(
     }
   }
 
-  // ── 6. Servicios AWS recomendados ─────────────────────────────────────────
+  // ── 10. Servicios AWS recomendados ────────────────────────────────────────
   if (y > CONTENT_BOTTOM - 60) {
     doc.addPage();
     y = CONTENT_TOP;
@@ -864,7 +864,7 @@ export async function generateAnalysisReportPdf(
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(11.5);
   doc.setTextColor(...BRAND_DARK);
-  doc.text('5. INFRAESTRUCTURA AWS RECOMENDADA', MARGIN, y);
+  doc.text('9. INFRAESTRUCTURA AWS RECOMENDADA', MARGIN, y);
   y += 7;
 
   const servicesBody: RowInput[] = services.map((s) => [
@@ -928,7 +928,7 @@ export async function generateAnalysisReportPdf(
     );
   }
 
-  // ── 7. Footer ─────────────────────────────────────────────────────────────
+  // ── Footer ────────────────────────────────────────────────────────────────
   const pageCount = doc.getNumberOfPages();
   for (let page = 1; page <= pageCount; page += 1) {
     doc.setPage(page);
@@ -939,10 +939,14 @@ export async function generateAnalysisReportPdf(
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(7);
     doc.setTextColor(...MUTED);
+    // El texto de procedencia es largo: con una sola linea pisa el numero de
+    // pagina de la derecha. Se limita el ancho a la mitad de la hoja para que
+    // salte de linea solo y quede en dos renglones a la izquierda.
     doc.text(
       'CloudOps Dashboard · Analisis estatico por patrones y CWE. No es un modelo de lenguaje.',
       MARGIN,
-      FOOTER_Y + 5
+      FOOTER_Y + 5,
+      { maxWidth: CONTENT_W / 2 }
     );
     doc.text(`Pagina ${page} de ${pageCount}`, PAGE.width - MARGIN, FOOTER_Y + 5, { align: 'right' });
   }
