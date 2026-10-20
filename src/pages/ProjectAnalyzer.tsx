@@ -535,10 +535,9 @@ export const ProjectAnalyzer: React.FC = () => {
   // ── Form state ──
   const [projectName, setProjectName] = useState('');
   const [language, setLanguage] = useState('Auto-detectar');
-  // 'upload' = archivos/ZIP | 'github' = repo publico | 'paste' = pegar código | 'description' = texto
-  const [inputMode, setInputMode] = useState<'upload' | 'github' | 'paste' | 'description'>('upload');
+  // 'upload' = archivos/ZIP | 'github' = repo publico | 'paste' = pegar código
+  const [inputMode, setInputMode] = useState<'upload' | 'github' | 'paste'>('upload');
   const [code, setCode] = useState('');
-  const [description, setDescription] = useState('');
   const [githubUrl, setGithubUrl] = useState('');
   const [isFetchingRepo, setIsFetchingRepo] = useState(false);
   const [loadedFiles, setLoadedFiles] = useState<LoadedFile[]>([]);
@@ -703,8 +702,6 @@ export const ProjectAnalyzer: React.FC = () => {
       if (included.length === 0) e.input = 'Carga un repositorio de GitHub antes de analizar.';
     } else if (inputMode === 'paste' && code.trim().length < 20) {
       e.input = 'Pega al menos 20 caracteres de código para analizar.';
-    } else if (inputMode === 'description' && description.trim().length < 30) {
-      e.input = 'Escribe una descripción más detallada (mínimo 30 caracteres).';
     }
 
     setErrors(e);
@@ -732,7 +729,7 @@ export const ProjectAnalyzer: React.FC = () => {
       setSelection(null);
     }
 
-    await runProjectAnalysis(projectName.trim(), finalCode, description.trim(), lang, true);
+    await runProjectAnalysis(projectName.trim(), finalCode, '', lang, true);
     setActiveTab('findings');
   };
 
@@ -887,7 +884,7 @@ export const ProjectAnalyzer: React.FC = () => {
           <div>
             <h2 className="text-base font-bold text-[#1E293B] dark:text-white">Conectar Proyecto para Análisis</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Sube un ZIP, conecta un repositorio de GitHub, arrastra archivos, pega código o describe tu sistema.
+              Sube un ZIP, conecta un repositorio de GitHub, arrastra archivos o pega código.
             </p>
           </div>
           <button
@@ -944,7 +941,6 @@ export const ProjectAnalyzer: React.FC = () => {
               { key: 'upload', label: 'Subir Archivos / ZIP', icon: Upload },
               { key: 'github', label: 'Repositorio GitHub', icon: GitFork },
               { key: 'paste', label: 'Pegar Código', icon: FileCode2 },
-              { key: 'description', label: 'Describir Sistema', icon: Sparkles },
             ].map(({ key, label, icon: Icon }) => (
               <button
                 key={key}
@@ -1206,31 +1202,6 @@ export const ProjectAnalyzer: React.FC = () => {
               <p className="text-[11px] text-slate-400 mt-1.5">
                 {code.split('\n').filter((l) => l.trim()).length} líneas ingresadas
               </p>
-            </div>
-          )}
-
-          {/* ── MODE: Description ── */}
-          {inputMode === 'description' && (
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-2">
-                Descripción del Sistema <span className="text-rose-500">*</span>
-              </label>
-              <textarea
-                rows={6}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Describe el sistema que quieres analizar. Ej: API REST con Node.js que gestiona usuarios, productos y pedidos. Usa MySQL para la base de datos, autenticación JWT y está conectado a un frontend React..."
-                className={`w-full px-4 py-3 rounded-xl border text-sm bg-slate-50 dark:bg-slate-800/80 text-slate-800 dark:text-white focus:outline-none focus:ring-2 transition-all resize-none ${
-                  errors.input
-                    ? 'border-rose-400 focus:ring-rose-400'
-                    : 'border-slate-200 dark:border-slate-700 focus:ring-blue-500 focus:border-blue-500'
-                }`}
-              />
-              {errors.input && (
-                <p className="text-xs text-rose-500 mt-1 flex items-center gap-1">
-                  <AlertCircle className="w-3.5 h-3.5" />{errors.input}
-                </p>
-              )}
             </div>
           )}
 
@@ -1762,7 +1733,7 @@ export const ProjectAnalyzer: React.FC = () => {
           <div>
             <p className="text-lg font-bold text-slate-800 dark:text-white mb-1">Listo para analizar tu proyecto</p>
             <p className="text-sm text-slate-500 dark:text-slate-400 max-w-md">
-              Sube un ZIP con tu proyecto, conecta un repositorio de GitHub, pega el código directamente o describe tu sistema. La IA evaluará la seguridad e identificará vulnerabilidades.
+              Sube un ZIP con tu proyecto, conecta un repositorio de GitHub o pega el código directamente. La IA evaluará la seguridad e identificará vulnerabilidades.
             </p>
           </div>
           <button
