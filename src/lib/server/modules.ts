@@ -279,7 +279,19 @@ export function buildFolderModules(files: SourceFile[]): FileModule[] {
 
   const head = modules.slice(0, MAX_MODULES - 1);
   const tail = modules.slice(MAX_MODULES - 1);
-  head.push(toModule('otros', tail.flatMap((m) => m.content.split('\n\n').map((c) => ({ path: 'x.ts', content: c })))));
+
+  // Los archivos del sobrante se reconstruyen CON SUS RUTAS REALES. Antes se
+  // pegaban con un path ficticio ('x.ts'), y eso dejaba al regex y a la IA sin
+  // forma de decir "archivo:linea" justo en los modulos que mas tenian que
+  // revisar: un hallazgo ahi no se podia abrir ni comprobar.
+  const tailFiles: SourceFile[] = [];
+  for (const m of tail) {
+    const lines = m.content.split('\n');
+    for (const s of m.spans) {
+      tailFiles.push({ path: s.path, content: lines.slice(s.startLine - 1, s.endLine).join('\n') });
+    }
+  }
+  head.push(toModule('otros', tailFiles));
   head[head.length - 1].fileCount = tail.reduce((acc, m) => acc + m.fileCount, 0);
   return head;
 }

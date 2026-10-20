@@ -626,13 +626,21 @@ const PENALTIES: Record<'critical' | 'high' | 'medium' | 'low' | 'info', number>
  * cuenta: en el modo pegar no hay nombres de archivo, pero el usuario pegó ese
  * codigo y puede verlo entero.
  */
+function puntua(f: {
+  advisory?: boolean;
+  source?: 'regex' | 'ai';
+  file?: string;
+}): boolean {
+  return !f.advisory && (f.source !== 'ai' || Boolean(f.file));
+}
+
 function scored(findings: {
   advisory?: boolean;
   severity: keyof typeof PENALTIES;
   source?: 'regex' | 'ai';
   file?: string;
 }[]) {
-  return findings.filter((f) => !f.advisory && (f.source !== 'ai' || Boolean(f.file)));
+  return findings.filter(puntua);
 }
 
 /** Arranca en 100 y descuenta por severidad, sin bajar de 0. */
@@ -677,34 +685,135 @@ interface ScoreLine {
   occurrences?: number;
 }
 
-const SEV_PENALTY: Record<'critical' | 'high' | 'medium' | 'low' | 'info', number> = {
-  critical: 25,
-  high: 15,
-  medium: 8,
-  low: 3,
-  info: 1,
-};
-
 /** "src/routes/auth.js:4", o el modulo si el hallazgo no tiene archivo. */
 function loc(f: { file?: string; line?: number; affectedModule: string }): string {
   if (!f.file) return f.affectedModule;
   return f.line ? `${f.file}:${f.line}` : f.file;
 }
 
+/** Lo que resta cada repeticion extra del MISMO patron en otro archivo. */
+const REPEAT_PENALTY = 5;
+
 /**
- * Las restas del score, una linea por hallazgo puntuable. Sirve para que la
- * interfaz pueda enseñar "100 - 25 - 15 = 60" en vez de un 60 suelto.
+ * Score del proyecto: parte de 100 y descuenta. Se deduplica por (patron,
+ * archivo) y no por patron solo: el mismo patron en dos archivos son dos
+ * problemas, y si la primera aparicion era una recomendacion, la version por
+ * patron solo tiraba el hallazgo REAL de la segunda y dejaba el proyecto en
+ * 100/100. La primera aparicion resta su penalizacion completa y cada archivo
+ * extra resta REPEAT_PENALTY, para que 50 secretos no hundan el score a 0.
+ *
+ * El desglose se genera aqui con las penalizaciones reales: la suma de sus
+ * lineas es exactamente lo que se resta, y la pantalla puede ensenar
+ * "100 - 25 - 5 = 70" sin que la cuenta mienta.
+ *
+ * Es generica para devolver los hallazgos con SU tipo completo (siguen
+ * necesitando category y lo demas para buildAwsRecommendations).
  */
-function buildScoreBreakdown(findings: { advisory?: boolean; title: string; severity: keyof typeof SEV_PENALTY; file?: string; line?: number; affectedModule: string; occurrences?: number }[]): ScoreLine[] {
-  return findings
-    .filter((f) => !f.advisory)
-    .map((f) => ({
-      label: `${f.title} — ${loc(f)}`,
+function scoreProject<
+  T extends {
+    id: string;
+    title: string;
+    severity: keyof typeof PENALTIES;
+    file?: string;
+    line?: number;
+    affectedModule: string;
+    occurrences?: number;
+    advisory?: boolean;
+    source?: 'regex' | 'ai';
+  }
+>(findings: T[]): {
+  score: number;
+  breakdown: ScoreLine[];
+  deduped: T[];
+} {
+  const seen = new Set<string>();
+  const seenPatterns = new Set<string>();
+  const breakdown: ScoreLine[] = [];
+  const deduped: T[] = [];
+  let penalty = 0;
+
+  /** Los archivos reales del hallazgo, o su modulo si no tiene archivo. */
+  const filesOf = (f: {
+    file?: string;
+    locations?: { file: string }[];
+    affectedModule: string;
+  }): string[] => {
+    const files = new Set<string>();
+    if (f.file) files.add(f.file);
+    for (const l of f.locations ?? []) files.add(l.file);
+    return files.size > 0 ? Array.from(files) : [f.affectedModule];
+  };
+
+  for (const f of findings) {
+    const pattern = f.id.replace(/^mod\d+-/, '');
+
+    // Un mismo hallazgo abarca varios archivos cuando el patron se repite en
+    // ellos: se cuenta como problema en CADA uno. Los archivos del mismo modulo
+    // comparten `name`, asi que un dedup por nombre fundiria los cinco en uno y
+    // ademas dejaria que una recomendacion tapara al critico real.
+    let seenAny = false;
+    const pendientes: string[] = [];
+    for (const file of filesOf(f)) {
+      const key = `${pattern}@@${file}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (!seenAny) {
+        seenAny = true;
+        deduped.push(f);
+      } else {
+        pendientes.push(file);
+      }
+    }
+    if (!seenAny) continue;
+    if (!puntua(f)) continue;
+
+    // La penalizacion completa la paga el patron en su PRIMER archivo, sin
+    // importar el orden; los siguientes pagan el tope, que evita que 50
+    // secretos hundan el score a 0.
+    const base = PENALTIES[f.severity] ?? 0;
+    const count = 1 + pendientes.length;
+    let value = 0;
+    let pagoCompleto = false;
+    for (let i = 0; i < count; i += 1) {
+      const first = !seenPatterns.has(pattern);
+      seenPatterns.add(pattern);
+      if (first) {
+        pagoCompleto = true;
+        value += base;
+      } else {
+        value += Math.min(REPEAT_PENALTY, base);
+      }
+    }
+    if (value <= 0) continue;
+
+    penalty += value;
+    breakdown.push({
+      label: firstLabel(f, pagoCompleto, count),
       severity: f.severity,
-      penalty: SEV_PENALTY[f.severity] ?? 0,
+      penalty: value,
       occurrences: f.occurrences,
-    }))
-    .sort((a, b) => b.penalty - a.penalty);
+    });
+  }
+
+  breakdown.sort((a, b) => b.penalty - a.penalty);
+  return { score: Math.max(0, 100 - penalty), breakdown, deduped };
+}
+
+/**
+ * Etiqueta del desglose. Cuando un hallazgo abarca varios archivos hay que
+ * decirlo: la suma de la linea (varias veces la penalidad) no coincidiria con
+ * un relato de "un problema, 25 puntos".
+ */
+function firstLabel(
+  f: { title: string; severity: keyof typeof PENALTIES; file?: string; line?: number; affectedModule: string },
+  primeraEsCompleta: boolean,
+  archivosContados: number
+): string {
+  const nombre = primeraEsCompleta ? f.title : `${f.title} (repeticion del patron)`;
+  if (archivosContados === 1) return `${nombre} - ${loc(f)}`;
+  const valor = PENALTIES[f.severity] ?? 0;
+  const extra = (archivosContados - 1) * Math.min(REPEAT_PENALTY, valor);
+  return `${nombre} en ${archivosContados} archivos - ${loc(f)} (${valor} + ${extra})`;
 }
 
 // Senales de codigo para los controles que no dependen de un hallazgo
@@ -938,8 +1047,22 @@ interface CoverageInput {
   perLanguage?: ReturnType<typeof buildLanguageCoverage>;
   filesAnalyzed: number;
   totalLines: number;
-  findings: { file?: string; advisory?: boolean }[];
+  findings: {
+    id: string;
+    file?: string;
+    line?: number;
+    advisory?: boolean;
+    locations?: { file: string; line: number }[];
+  }[];
   rulesApplied: number;
+}
+
+/** Todos los archivos donde aparece el hallazgo: el principal y sus copias. */
+function findingFiles(f: { file?: string; locations?: { file: string }[] }): string[] {
+  const files = new Set<string>();
+  if (f.file) files.add(f.file);
+  for (const l of f.locations ?? []) files.add(l.file);
+  return Array.from(files);
 }
 
 /**
@@ -995,9 +1118,23 @@ function buildLanguageCoverage(modules: {
 function buildCoverage(input: CoverageInput) {
   const withFile = input.findings.filter((f) => Boolean(f.file));
 
-  const filesWithFindings = new Set(withFile.map((f) => f.file as string)).size;
+  // Las cifras por archivo siguen el MISMO criterio que el score: se agrupa por
+  // (patron, archivo). Antes contaban por hallazgo, y con un patron repetido en
+  // cinco archivos salian "1 hallazgo" y "1 archivo afectado" aunque estuvieran
+  // los cinco. Las apariciones son las que guarda el motor en `locations`.
+  const unique = new Map<string, CoverageInput['findings'][number]>();
+  for (const f of input.findings) {
+    const pattern = f.id.replace(/^mod\d+-/, '');
+    for (const file of findingFiles(f)) {
+      const key = `${pattern}@@${file}`;
+      if (!unique.has(key)) unique.set(key, f);
+    }
+  }
+  const units = Array.from(unique.values());
+
+  const filesWithFindings = new Set(units.flatMap(findingFiles)).size;
   const filesWithVulnerabilities = new Set(
-    withFile.filter((f) => !f.advisory).map((f) => f.file as string)
+    units.filter((f) => !f.advisory).flatMap(findingFiles)
   ).size;
 
   // Hallazgos que el modelo detecto pero sin decir en que archivo estan. No se
@@ -1439,21 +1576,12 @@ app.listen(3000);
     new Set(analyzedModules.map((m) => m.framework).filter((f): f is string => Boolean(f)))
   );
 
-  // Deduplicar hallazgos por id global del proyecto
-  const allFindings = analyzedModules.flatMap((m) => m.findings);
-  const seenCategories = new Set<string>();
-  const dedupedFindings = allFindings.filter((f) => {
-    const key = f.id.replace(/^mod\d+-/, '');
-    if (seenCategories.has(key)) return false;
-    seenCategories.add(key);
-    return true;
-  });
-
-  // Score global: promedio ponderado de módulos (más líneas = más peso)
-  const totalLines = analyzedModules.reduce((a, m) => a + m.linesAnalyzed, 0) || 1;
-  const weightedScore =
-    analyzedModules.reduce((acc, m) => acc + m.securityScore * m.linesAnalyzed, 0) / totalLines;
-  const overallScore = Math.round(weightedScore);
+  // Score global y deduplicacion en un solo paso: mismo calculo que el motor
+  // compartido de src/lib/server/analyze.ts, o el navegador y la API dan
+  // resultados distintos para el MISMO codigo (lo comprueba tests/parity).
+  const { score: overallScore, breakdown: scoreBreakdown, deduped: dedupedFindings } =
+    scoreProject(analyzedModules.flatMap((m) => m.findings));
+  const dedupedSet = new Set(dedupedFindings);
 
   // Cumplimiento: seis controles con aprobado/fallo y su motivo, en vez del
   // antiguo "100 menos diez por cada categoría de vulnerabilidad", que no
@@ -1461,8 +1589,6 @@ app.listen(3000);
   const complianceControls = buildComplianceControls(analysisTarget, dedupedFindings);
   const complianceScore = complianceScoreOf(complianceControls);
 
-  // La cuenta del score, una línea por hallazgo puntuable.
-  const scoreBreakdown = buildScoreBreakdown(analyzedModules.flatMap((m) => m.findings));
   const advisoryCount = dedupedFindings.filter((f) => f.advisory).length;
 
   // Cifras de cobertura: cuanto del proyecto esta afectado de verdad. Son las
@@ -1473,7 +1599,9 @@ app.listen(3000);
     totalLines: analysisTarget.split('\n').length,
     findings: dedupedFindings,
     rulesApplied: SECURITY_PATTERNS.length + SQL_RULES.length,
-    perLanguage: buildLanguageCoverage(analyzedModules),
+    perLanguage: buildLanguageCoverage(
+      analyzedModules.map((m) => ({ ...m, findings: m.findings.filter((f) => dedupedSet.has(f)) }))
+    ),
   });
 
   // Determinar tamaño de infraestructura según código/descripción

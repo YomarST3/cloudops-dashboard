@@ -542,12 +542,6 @@ export const ProjectAnalyzer: React.FC = () => {
   const [dragOver, setDragOver] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'findings' | 'modules' | 'recommendations' | 'costs'>('findings');
-  /**
-   * Segunda capa del análisis. Apagada por defecto a propósito: cada análisis
-   * con IA consume requests del límite diario gratuito, y para pruebas
-   * repetidas conviene poder quedarse solo con los patrones estáticos.
-   */
-  const [useAiReview, setUseAiReview] = useState(false);
   /** Último envío real: archivos que entraron y que se quedaron fuera. */
   const [selection, setSelection] = useState<FileSelection | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -680,7 +674,7 @@ export const ProjectAnalyzer: React.FC = () => {
       setSelection(null);
     }
 
-    await runProjectAnalysis(projectName.trim(), finalCode, description.trim(), lang, useAiReview);
+    await runProjectAnalysis(projectName.trim(), finalCode, description.trim(), lang, true);
     setActiveTab('findings');
   };
 
@@ -1110,24 +1104,6 @@ export const ProjectAnalyzer: React.FC = () => {
             </div>
           )}
 
-          <label className="flex items-start gap-3 p-3 rounded-xl border border-violet-200 dark:border-violet-900/60 bg-violet-50/60 dark:bg-violet-950/20 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={useAiReview}
-              onChange={(e) => setUseAiReview(e.target.checked)}
-              disabled={isAnalyzing}
-              className="mt-0.5 w-4 h-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500 disabled:opacity-50"
-            />
-            <span className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-              <strong className="block text-slate-800 dark:text-white font-semibold">
-                Revisar también con IA (Gemini)
-              </strong>
-              Los patrones estáticos ya se ejecutan siempre. Esta opción añade una segunda
-              revisión módulo a módulo con un modelo de IA, que detecta problemas más
-              sutiles. Tarda más y consume cuota del API, así que es opcional.
-            </span>
-          </label>
-
           <div className="flex items-center justify-between pt-2">
             <p className="text-xs text-slate-500 dark:text-slate-400">
               Región de despliegue: <strong className="text-slate-700 dark:text-slate-300">{currentRegion.name}</strong>
@@ -1175,174 +1151,20 @@ export const ProjectAnalyzer: React.FC = () => {
           <div className="bg-gradient-to-r from-[#0F172A] via-[#1E293B] to-[#2563EB]/80 rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden">
             <div className="absolute right-0 top-0 bottom-0 w-1/3 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-blue-400/20 via-transparent to-transparent pointer-events-none" />
             <div className="relative z-10 flex flex-col sm:flex-row sm:items-center gap-6">
-              {/* Score circle */}
-              <div className="flex flex-col items-center">
-                {/*
-                  El titular ya no es el indice 0-100. Ese numero solo decia
-                  "ninguno de mis 15 patrones disparo", y presentarlo como
-                  "seguridad" era una afirmacion que la herramienta no puede
-                  sostener. Ahora manda el porcentaje de archivos afectados,
-                  que es lo que publican las herramientas de verdad y se puede
-                  comprobar.
-                */}
-                {/*
-                  El titular ya no es el indice 0-100. Ese numero solo decia
-                  "ninguno de mis 15 patrones disparo", y presentarlo como
-                  "seguridad" era una afirmacion que la herramienta no puede
-                  sostener. Ahora manda el porcentaje de archivos afectados.
-
-                  Tres casos, porque con una sola cifra el titular se
-                  contradecía: si hay hallazgos que el modelo no pudo localizar,
-                  decir "0%" mientras el total es 1 es sencillamente falso.
-                */}
-                {(() => {
-                  const c = result.coverage;
-                  const sinLocalizar = c?.unattributedFindings ?? 0;
-                  const hayVuln = result.totalFindings > 0;
-                  const localizables = c ? c.filesWithVulnerabilities > 0 : false;
-
-                  // Sin cobertura (analisis antiguo): se cae al indice.
-                  if (!c) {
-                    return (
-                      <>
-                        <div className={`w-24 h-24 rounded-full bg-gradient-to-br ${scoreBg(result.overallSecurityScore)} flex items-center justify-center shadow-lg`}>
-                          <span className="text-3xl font-extrabold text-white">{result.overallSecurityScore}</span>
-                        </div>
-                        <span className="text-xs font-bold mt-2 opacity-80">{scoreLabel(result.overallSecurityScore)}</span>
-                      </>
-                    );
-                  }
-
-                  if (!hayVuln) {
-                    return (
-                      <>
-                        <div className="w-24 h-24 rounded-full bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center shadow-lg">
-                          <ShieldCheck className="w-10 h-10 text-white" />
-                        </div>
-                        <span className="text-xs font-bold mt-2 opacity-80 text-center leading-tight">
-                          Sin vulnerabilidades
-                        </span>
-                        <span className="text-[10px] opacity-60 mt-0.5">{c.filesAnalyzed} archivos analizados</span>
-                      </>
-                    );
-                  }
-
-                  if (!localizables && sinLocalizar > 0) {
-                    return (
-                      <>
-                        <div className="w-24 h-24 rounded-full bg-gradient-to-br from-amber-500 to-amber-600 flex items-center justify-center shadow-lg">
-                          <span className="text-3xl font-extrabold text-white">{sinLocalizar}</span>
-                        </div>
-                        <span className="text-xs font-bold mt-2 opacity-80 text-center leading-tight">
-                          sin archivo localizable
-                        </span>
-                        <span className="text-[10px] opacity-60 mt-0.5">la IA no indicó dónde</span>
-                      </>
-                    );
-                  }
-
-                  return (
-                    <>
-                      <div className={`w-24 h-24 rounded-full bg-gradient-to-br ${scoreBg(100 - c.vulnerabilityFileRate)} flex items-center justify-center shadow-lg`}>
-                        <span className="text-3xl font-extrabold text-white">{c.vulnerabilityFileRate}%</span>
-                      </div>
-                      <span className="text-xs font-bold mt-2 opacity-80 text-center leading-tight">
-                        de los archivos tiene una vulnerabilidad
-                      </span>
-                      <span className="text-[10px] opacity-60 mt-0.5">
-                        {c.filesWithVulnerabilities} de {c.filesAnalyzed} archivos
-                      </span>
-                    </>
-                  );
-                })()}
+              {/* Score circle — siempre muestra el índice 0-100 */}
+              <div className="flex flex-col items-center shrink-0">
+                <div className={`w-28 h-28 rounded-full bg-gradient-to-br ${scoreBg(result.overallSecurityScore)} flex flex-col items-center justify-center shadow-lg`}>
+                  <span className="text-4xl font-extrabold text-white leading-none">{result.overallSecurityScore}</span>
+                  <span className="text-xs font-bold text-white/70 leading-none mt-0.5">/100</span>
+                </div>
+                <span className="text-xs font-bold mt-2 opacity-90 text-center">{scoreLabel(result.overallSecurityScore)}</span>
+                <span className="text-[10px] opacity-60 mt-0.5 text-center">Índice de seguridad</span>
               </div>
 
               <div className="flex-1">
-                {/*
-                  El rotulo "Resultado del Analisis IA" sequito de aqui a proposito:
-                  dentro de la tarjeta competia con el titular por el ancho y hacia
-                  que el texto del resumen se partiese en varias lineas desiguales.
-                  Ahora es una etiqueta pequena encima de la tarjeta, que es donde
-                  pertenece.
-                */}
                 <h2 className="text-xl sm:text-2xl font-extrabold mb-2">{result.projectName}</h2>
                 <p className="text-sm text-slate-300 leading-relaxed">{result.summary}</p>
-
-                {result.coverage && (
-                  <div className="flex flex-wrap gap-x-5 gap-y-1 mt-3">
-                    {[
-                      {
-                        k: 'Archivos con alguna observación',
-                        v: `${result.coverage.filesWithFindings} de ${result.coverage.filesAnalyzed}`,
-                      },
-                      {
-                        k: 'Observaciones por cada 1.000 líneas',
-                        v: String(result.coverage.findingsPerThousandLines),
-                      },
-                      {
-                        k: 'Recomendaciones',
-                        v: `${result.advisoryCount ?? 0} (no penalizan)`,
-                      },
-                    ].map((s) => (
-                      <span key={s.k} className="text-[11px]">
-                        <span className="text-slate-400">{s.k}: </span>
-                        <span className="font-semibold text-slate-200">{s.v}</span>
-                      </span>
-                    ))}
-                  </div>
-                )}
-
-                {/* Qué se revisó y qué no: la diferencia entre "no encontré nada" y "no miré". */}
-                {result.coverage?.perLanguage && result.coverage.perLanguage.length > 0 && (
-                  <details className="mt-3 rounded-xl bg-white/5 border border-white/10 px-3 py-2">
-                    <summary className="cursor-pointer text-[11px] text-slate-300">
-                      Qué se revisó, por lenguaje
-                    </summary>
-                    <div className="mt-2 space-y-1">
-                      {result.coverage.perLanguage.map((l) => (
-                        <div key={l.language} className="flex items-baseline gap-2 text-[11px]">
-                          <span className="font-semibold text-slate-200 w-24 shrink-0">
-                            {l.language}
-                          </span>
-                          <span className="text-slate-400">
-                            {l.files} archivos · {l.rules} reglas ·{' '}
-                            {l.vulnerabilities} de {l.detections} detecciones
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                )}
-
-                {/* El alcance, en pequeño. Declarar cuantas reglas se aplicaron
-                    no resta credibilidad: es lo que permite contrastar el
-                    resultado en vez de aceptarlo a ciegas. */}
-                {result.coverage && (
-                  <p className="text-[10px] text-slate-500 mt-2 max-w-xl">
-                    Análisis basado en {result.coverage.rulesApplied} patrones
-                    {result.aiEnabled ? ' más una revisión con IA' : ''}. No es una auditoría completa.
-                  </p>
-                )}
               </div>
-
-              {/* Estado de la segunda capa (IA). Distingue "no se pidió" de
-                  "se pidió y falló", que son cosas distintas para el usuario. */}
-              {result.aiEnabled && !result.aiError && (
-                <div className="flex items-center gap-3 p-3 rounded-xl bg-violet-500/10 border border-violet-400/30">
-                  <BrainCircuit className="w-4 h-4 text-violet-300 shrink-0" />
-                  <p className="text-xs text-violet-100 leading-relaxed">
-                    Revisado con <strong>{result.aiModel}</strong>: {result.aiFindingCount ?? 0}{' '}
-                    hallazgo{result.aiFindingCount === 1 ? '' : 's'} aporta{result.aiFindingCount === 1 ? 'do' : 'dos'} por la IA, marcados con
-                    la etiqueta <span className="font-bold">IA</span>. Ya están incluidos en las cifras de arriba.
-                  </p>
-                </div>
-              )}
-              {result.aiError && (
-                <div className="flex items-center gap-3 p-3 rounded-xl bg-amber-500/10 border border-amber-400/30">
-                  <AlertTriangle className="w-4 h-4 text-amber-300 shrink-0" />
-                  <p className="text-xs text-amber-100 leading-relaxed">{result.aiError}</p>
-                </div>
-              )}
 
               {/* Severity counters. Solo vulnerabilidades: las recomendaciones van en su
                   propia casilla y en su propio bloque, para que nunca se
@@ -1363,6 +1185,73 @@ export const ProjectAnalyzer: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {/* Métricas de cobertura + estado Gemini */}
+          {(result.coverage || result.aiEnabled || result.aiError) && (
+            <div className="bg-white dark:bg-[#1E293B] border border-[#E2E8F0] dark:border-[#334155] rounded-2xl p-5 shadow-sm space-y-3">
+
+              {/* Estadísticas de cobertura */}
+              {result.coverage && (
+                <div className="flex flex-wrap gap-x-6 gap-y-2">
+                  {[
+                    { k: 'Archivos con alguna observación', v: `${result.coverage.filesWithFindings} de ${result.coverage.filesAnalyzed}` },
+                    { k: 'Observaciones por cada 1.000 líneas', v: String(result.coverage.findingsPerThousandLines) },
+                    { k: 'Recomendaciones', v: `${result.advisoryCount ?? 0} (no penalizan)` },
+                  ].map((s) => (
+                    <span key={s.k} className="text-xs">
+                      <span className="text-slate-400">{s.k}: </span>
+                      <strong className="text-slate-700 dark:text-slate-200">{s.v}</strong>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {/* Qué se revisó por lenguaje */}
+              {result.coverage?.perLanguage && result.coverage.perLanguage.length > 0 && (
+                <details className="rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 px-3 py-2">
+                  <summary className="cursor-pointer text-xs font-semibold text-slate-600 dark:text-slate-300">
+                    Qué se revisó, por lenguaje
+                  </summary>
+                  <div className="mt-2 space-y-1">
+                    {result.coverage.perLanguage.map((l) => (
+                      <div key={l.language} className="flex items-baseline gap-2 text-xs">
+                        <span className="font-semibold text-slate-700 dark:text-slate-200 w-24 shrink-0">{l.language}</span>
+                        <span className="text-slate-500 dark:text-slate-400">
+                          {l.files} archivos · {l.rules} reglas · {l.vulnerabilities} de {l.detections} detecciones
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+
+              {/* Estado Gemini */}
+              {result.aiEnabled && !result.aiError && (
+                <div className="flex items-center gap-3 p-3 rounded-xl bg-violet-50 dark:bg-violet-950/30 border border-violet-200 dark:border-violet-800">
+                  <BrainCircuit className="w-4 h-4 text-violet-600 dark:text-violet-400 shrink-0" />
+                  <p className="text-xs text-violet-700 dark:text-violet-300 leading-relaxed">
+                    Revisado con <strong>{result.aiModel}</strong>: {result.aiFindingCount ?? 0}{' '}
+                    hallazgo{result.aiFindingCount === 1 ? '' : 's'} aportado{result.aiFindingCount === 1 ? '' : 's'} por la IA
+                    {(result.aiFindingCount ?? 0) > 0 && <>, marcados con la etiqueta <span className="font-bold">IA</span></>}.
+                    Ya incluidos en las cifras de arriba.
+                  </p>
+                </div>
+              )}
+              {result.aiError && (
+                <div className="flex items-center gap-3 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                  <p className="text-xs text-amber-700 dark:text-amber-300 leading-relaxed">{result.aiError}</p>
+                </div>
+              )}
+
+              {/* Nota de alcance */}
+              {result.coverage && (
+                <p className="text-[11px] text-slate-400">
+                  Análisis basado en {result.coverage.rulesApplied} patrones{result.aiEnabled ? ' + revisión con Gemini' : ''}. No es una auditoría completa.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Summary KPIs */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

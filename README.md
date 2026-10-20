@@ -389,7 +389,7 @@ Las dos variables son **build args**, no variables de runtime: Vite las incrusta
 * Hay **un solo puntaje**: al fusionar se recalculan el score de cada módulo, el global, el compliance y los contadores. Los hallazgos de la IA entran en ese cálculo igual que los regex.
 * Ambos endpoints usan el **mismo troceado de módulos** (`api/_modules.ts`) y la **misma fórmula de puntaje** (`api/_analyze.ts`). Sin eso, los hallazgos de la IA acabarían adjudicados a carpetas distintas de las que usa el regex.
 * Van en endpoints separados por un motivo concreto: una función serverless de Vercel dura 60 s y aquí se hacen hasta 15 llamadas al modelo (una por módulo). Si compartieran endpoint, al agotarse el tiempo se perdería también el análisis estático.
-* Es **gratis**: `gemini-3.5-flash-lite` da 500 requests/día en el plan gratuito, y el máximo por análisis son 15 (uno por módulo). `GEMINI_MODEL` permite cambiar a `gemini-3.8-flash` (más preciso, 20/día) sin tocar código. No se instala ningún SDK: se usa `fetch` nativo.
+* Es **gratis**: `gemini-3.5-flash-lite` da 500 requests/día en el plan gratuito, y el máximo por análisis son 15 (uno por módulo). Analiza el flujo de datos (autorización, IDOR, validación) y la lógica de negocio, no solo patrones. `GEMINI_MODEL` permite cambiarlo sin tocar código. No se instala ningún SDK: se usa `fetch` nativo.
 * A tener en cuenta: en el plan gratuito **Google usa el código enviado para entrenar sus modelos**. Para proyectos propios o de clase no hay problema, pero con código de cliente real conviene revisar esta política.
 
 ### Acceso (`/login`)

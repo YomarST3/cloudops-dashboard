@@ -26,22 +26,39 @@ import { analyzeCode, applyAiFindings, prepare, type AnalyzeInput } from '../src
  */
 export const maxDuration = 60;
 
-/** Flash-Lite: el unico con 500 requests/dia en el plan gratuito. */
+/**
+ * Flash-Lite: el unico con cupo diario amplio en el plan gratuito, y el unico
+ * que responde de forma consistente dentro del tiempo de una funcion serverless.
+ *
+ * Se probo flash (con thinking) porque promete mas profundidad, pero en vivo
+ * tarda 28-75 s por modulo y devuelve 503 con frecuencia: no cabe en los 60 s de
+ * Vercel y dejaba la revision con 0 hallazgos. Lite responde en ~1 s y detecta
+ * igual los fallos de flujo (IDOR, autorizacion ausente) que se le piden abajo.
+ */
 const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 /** Cortar un modulo enorme mantiene la respuesta manejable y el gasto acotado. */
-const MAX_CHARS_PER_MODULE = 60_000;
+const MAX_CHARS_PER_MODULE = 80_000;
 
 /** Techo de hallazgos por modulo: evita que un modulo contamine el informe. */
-const MAX_FINDINGS_PER_MODULE = 8;
+const MAX_FINDINGS_PER_MODULE = 12;
 
 /** Margen antes del corte de Vercel, para poder responder con lo que haya. */
-const DEADLINE_MS = 50_000;
+const DEADLINE_MS = 56_000;
 
-/** Dos a la vez: ni satura el rate limit por minuto ni triplica el tiempo. */
-const CONCURRENCY = 2;
+/** Cuatro a la vez: menos de 15 modulos y margen de sobra dentro de los 60 s. */
+const CONCURRENCY = 4;
+
+/**
+ * Base de la espera antes de reintentar un 429/503, en milisegundos. Es
+ * configurable para que las pruebas no tengan que esperar segundos reales.
+ */
+function retryBaseMs(): number {
+  const v = Number(process.env.GEMINI_RETRY_MS);
+  return Number.isFinite(v) && v >= 0 ? v : 4_000;
+}
 
 const SEVERITIES: SecurityFindingSeverity[] = ['critical', 'high', 'medium', 'low', 'info'];
 
@@ -81,14 +98,29 @@ const SYSTEM_PROMPT = [
   '"recommendation":"como corregirlo de forma concreta",',
   '"cweId":"CWE-89"}]}',
   '',
+  'Trabajas en DOS CAPAS, y hay que cubrir las dos:',
+  '1. SEGURIDAD DE FLUJO: sigue el dato de principio a fin. Quien puede llamar a',
+  '   esta funcion, si se comprueba la sesion y el permiso ANTES de tocar datos,',
+  '   si la entrada del usuario llega a una consulta, a una ruta de archivo o al',
+  '   HTML sin sanear, y si un usuario puede leer o modificar filas de otro',
+  '   (IDOR). Esto es lo que un analizador de patrones NO puede ver.',
+  '2. LOGICA DE NEGOCIO: precios o cantidades que vienen del cliente sin',
+  '   recalcular en el servidor, estados que se pueden saltar (pagar sin stock,',
+  '   cancelar tras completar), limites de intentos o de cupo que nadie aplica,',
+  '   y confianza en una confirmacion hecha solo en el navegador.',
+  '',
   'Reglas importantes:',
+  '- El modulo puede contener varios archivos, cada uno encabezado por una linea',
+  '  "===== FILE: ruta =====". Cita SIEMPRE la ruta y la linea DENTRO de ese',
+  '  archivo (las lineas de cada archivo empiezan en 1), no la linea del',
+  '  volcado completo.',
   '- Si el modulo esta limpio, responde {"findings":[]} sin texto alrededor.',
   '- No inventes problemas ni supongas codigo que no aparece. Sin evidencia en el',
   '  codigo mostrado, no hay hallazgo.',
   '- No repitas lo que un analizador de patrones ya encuentra de forma obvia',
   '  (require de paquetes, console.log). Céntrate en lo que exige entender el',
   '  flujo: autorizacion, validacion de entrada, secretos, exposure de datos.',
-  '- Como maximo 8 hallazgos, ordenados del mas grave al menos grave.',
+  '- Como maximo 12 hallazgos, ordenados del mas grave al menos grave.',
 ].join('\n');
 
 // ─── Foco por stack ──────────────────────────────────────────────────────────
@@ -261,6 +293,39 @@ interface ModuleOutcome {
 }
 
 /**
+ * Anota el contenido del modulo con la ruta de cada archivo, para que el modelo
+ * pueda citar "archivo:linea".
+ *
+ * El modulo es varios archivos pegados con '\n\n' y sin marca entre ellos. Sin
+ * esta anotacion el modelo solo ve lineas de un volcado continuo y no puede
+ * decir en que archivo esta cada cosa; el numero de linea que devuelve tampoco
+ * sirve, porque cada archivo reinicia su cuenta. Con los marcadores y las lineas
+ * relativas por archivo, `lineHint` pasa a ser una ubicacion real.
+ */
+function annotate(
+  content: string,
+  spans: { path: string; startLine: number; endLine: number }[]
+): string {
+  if (spans.length === 0) return content;
+  const lines = content.split('\n');
+
+  // Se recorre de atras hacia adelante para insertar sin desplazar los indices
+  // de los spans que quedan por procesar.
+  const chunks: string[] = [];
+  for (let i = spans.length - 1; i >= 0; i -= 1) {
+    const span = spans[i];
+    const body = lines.slice(span.startLine - 1, span.endLine).join('\n');
+    // Lineas 1..N DENTRO de este archivo, no del volcado.
+    const numerado = body
+      .split('\n')
+      .map((l, n) => `${n + 1}: ${l}`)
+      .join('\n');
+    chunks.unshift(`===== FILE: ${span.path} =====\n${numerado}`);
+  }
+  return chunks.join('\n\n');
+}
+
+/**
  * Una llamada a Gemini. Nunca lanza: cualquier fallo (red, 4xx, 429, timeout o
  * una respuesta que no es JSON) se convierte en `error`, para que un fallo
  * puntual no tire abajo el analisis completo.
@@ -268,47 +333,83 @@ interface ModuleOutcome {
 async function reviewModule(
   key: string,
   model: string,
-  module: { name: string; content: string; language: string; framework?: string },
+  module: { name: string; content: string; language: string; framework?: string; spans?: { path: string; startLine: number; endLine: number }[] },
   idPrefix: string,
-  focus: string[]
+  focus: string[],
+  deadlineAt?: number
 ): Promise<ModuleOutcome> {
   const outcome: ModuleOutcome = { moduleName: module.name, findings: [] };
 
+  const anotado = annotate(module.content, module.spans ?? []);
   const content =
-    module.content.length > MAX_CHARS_PER_MODULE
-      ? module.content.slice(0, MAX_CHARS_PER_MODULE) +
+    anotado.length > MAX_CHARS_PER_MODULE
+      ? anotado.slice(0, MAX_CHARS_PER_MODULE) +
         `\n// [contenido truncado en ${MAX_CHARS_PER_MODULE} caracteres]`
-      : module.content;
+      : anotado;
 
   const where = `Modulo: ${module.name} (${module.language}${
     module.framework ? ` / ${module.framework}` : ''
   })`;
 
-  try {
-    const response = await fetch(`${GEMINI_BASE}/${encodeURIComponent(model)}:generateContent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      signal: AbortSignal.timeout(25_000),
-      body: JSON.stringify({
-        contents: [
+  const body = JSON.stringify({
+    contents: [
+      {
+        parts: [
           {
-            parts: [
-              {
-                text: `${SYSTEM_PROMPT}\n\n${focus.join('\n\n')}\n\n${where}\n\n\`\`\`\n${content}\n\`\`\``,
-              },
-            ],
+            text: `${SYSTEM_PROMPT}\n\n${focus.join('\n\n')}\n\n${where}\n\n\`\`\`\n${content}\n\`\`\``,
           },
         ],
-        // JSON mode en vez de response_schema: el esquema estructurado de
-        // Gemini es un subconjunto de JSON Schema y su formato ha cambiado entre
-        // versiones de la API. JSON mode es estable, y toFindings() valida y
-        // normaliza la respuesta igualmente.
-        generationConfig: { response_mime_type: 'application/json' },
-      }),
-    });
+      },
+    ],
+    // JSON mode en vez de response_schema: el esquema estructurado de
+    // Gemini es un subconjunto de JSON Schema y su formato ha cambiado entre
+    // versiones de la API. JSON mode es estable, y toFindings() valida y
+    // normaliza la respuesta igualmente.
+    generationConfig: { response_mime_type: 'application/json' },
+  });
+
+/**
+ * Timeout de UNA llamada a Gemini. Los modelos con thinking (flash) tardan mas
+ * que lite: con 25 s la llamada se abortaba SIEMPRE y la revision terminaba con
+ * 0 hallazgos. 45 s deja margen para la respuesta mas lenta, y como los modulos
+ * van en paralelo y el corte global es 56 s, un modulo lento no arrastra al
+ * resto (el worker comprueba el deadline antes de cada llamada, no dentro).
+ */
+const CALL_TIMEOUT_MS = 45_000;
+
+const send = () =>
+  fetch(`${GEMINI_BASE}/${encodeURIComponent(model)}:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+    body,
+  });
+
+  try {
+    let response = await send();
+
+    // 429 = limite por minuto (reintentar recupera el modulo; solo si vuelve a
+    // pasar es el diario). 503 = el modelo esta sobrecargado ("high demand"),
+    // que es transitorio y se cobra caro: sin reintento, un pico de Google deja
+    // la revision con 0 hallazgos y el informe parece decir "todo limpio".
+    // Ambos se reintentan UNA vez; el segundo intento tambien espera el doble.
+    let intento = 0;
+    while ((response.status === 429 || response.status === 503) && intento < 2) {
+      // Solo se reintenta si de verdad queda presupuesto: un reintento que
+      // empiece cerca del corte global (60 s de Vercel) moriria a medio camino
+      // y devolveria un error peor que el original.
+      const espera = retryBaseMs() * (intento + 1);
+      if (deadlineAt && Date.now() + espera + CALL_TIMEOUT_MS > deadlineAt) break;
+      intento += 1;
+      await new Promise((r) => setTimeout(r, espera));
+      response = await send();
+    }
 
     if (response.status === 429) {
       return { ...outcome, error: 'limite-diario' };
+    }
+    if (response.status === 503) {
+      return { ...outcome, error: 'modelo-saturado' };
     }
     if (!response.ok) {
       return { ...outcome, error: `Gemini respondio HTTP ${response.status}` };
@@ -384,6 +485,7 @@ export default async function handler(req: any, res: any) {
     content: m.content,
     language: m.language,
     framework: m.framework,
+    spans: m.spans,
   }));
 
   // El foco se decide UNA vez sobre el proyecto entero y se reutiliza en todas
@@ -406,7 +508,14 @@ export default async function handler(req: any, res: any) {
         continue;
       }
 
-      const outcome = await reviewModule(key, model, targets[i], `ai-mod${i}`, focus);
+      const outcome = await reviewModule(
+        key,
+        model,
+        targets[i],
+        `ai-mod${i}`,
+        focus,
+        started + DEADLINE_MS + 8_000
+      );
       outcomes[i] = outcome;
 
       // Cuota agotada: no insistir con los modulos que faltan.
@@ -429,14 +538,20 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  const problems = outcomes.filter((o) => o?.error && o.error !== 'limite-diario').length;
+  const problems = outcomes.filter(
+    (o) => o?.error && !['limite-diario', 'modelo-saturado'].includes(o.error)
+  ).length;
   const rateLimited = outcomes.some((o) => o?.error === 'limite-diario');
+  const saturado = outcomes.some((o) => o?.error === 'modelo-saturado');
   const noTime = outcomes.some((o) => o?.error === 'sin-tiempo');
 
   let aiError: string | undefined;
   if (rateLimited) {
     aiError =
       'Se alcanzo el limite diario de requests de Gemini: la revision se completo solo en parte. Prueba manana o cambia a otro modelo.';
+  } else if (saturado) {
+    aiError =
+      'El modelo de Gemini esta saturado ahora mismo (demanda alta en Google): la revision no cubrio todos los modulos. Vuelve a intentarlo en unos minutos.';
   } else if (noTime) {
     aiError = 'El analisis con IA se quedo sin tiempo y no cubrio todos los modulos.';
   } else if (problems > 0 && problems === outcomes.length) {

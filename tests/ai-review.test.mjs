@@ -25,6 +25,8 @@ function mockRes() {
 
 async function call(env, fetchImpl, input = INPUT) {
   for (const k of ['GEMINI_API_KEY', 'GEMINI_MODEL']) delete process.env[k];
+  // Sin espera real entre reintentos: las pruebas no deben tardar segundos.
+  process.env.GEMINI_RETRY_MS = '0';
   Object.assign(process.env, env);
   globalThis.fetch = fetchImpl;
 
@@ -98,15 +100,32 @@ check(
 check('el puntaje global baja al anadir hallazgos', ok.result.overallSecurityScore < 100, `score=${ok.result.overallSecurityScore}`);
 check('result trae los metadatos de IA', ok.result.aiEnabled === true && ok.result.aiFindingCount === 6);
 
-// 3. Cuota agotada (429) en el primer modulo.
+// 3. Cuota agotada (429) en todos los modulos. Cada modulo reintenta hasta dos
+//    veces (por si es el limite por minuto, no el diario) y despues se declara:
+//    3 modulos x 3 intentos.
 let llamadas = 0;
 const r429 = await call({ GEMINI_API_KEY: 'AIza-fake' }, () => {
   llamadas++;
   return Promise.resolve({ status: 429, ok: false, json: async () => ({}) });
 });
 check('429 -> aiError de limite diario', /limite diario/i.test(r429.aiError || ''), r429.aiError || '');
-check('429 -> no se insiste de mas', llamadas <= 2, `llamadas=${llamadas}`);
+check('429 -> reintenta por modulo y desiste', llamadas === 9, `llamadas=${llamadas}`);
 check('429 -> el regex sigue intacto', r429.result.totalFindings > 0 && r429.result.modules.length === 3);
+
+// 3b. El modelo saturado (503) es transitorio: se reintenta y se recupera.
+let intentos503 = 0;
+const r503 = await call({ GEMINI_API_KEY: 'AIza-fake' }, () => {
+  intentos503++;
+  // El primer intento de cada modulo da 503; el segundo ya responde bien.
+  const saturar = intentos503 <= 3;
+  return Promise.resolve(
+    saturar
+      ? { status: 503, ok: false, json: async () => ({}) }
+      : { status: 200, ok: true, json: async () => okBody(1) }
+  );
+});
+check('503 -> se reintenta y termina respondiendo', r503.aiFindingCount > 0, `count=${r503.aiFindingCount}`);
+check('503 -> sin error al recuperarse', !r503.aiError, r503.aiError || '');
 
 // 4. Gemini devuelve basura que no es JSON.
 const basura = await call({ GEMINI_API_KEY: 'AIza-fake' }, () =>
@@ -288,6 +307,41 @@ for (const [hint, file, line] of locCases) {
     `-> file=${f?.file} line=${f?.line}`
   );
 }
+
+// ── 13. El contenido que se manda lleva la ruta de cada archivo y su linea ───
+// El modulo es varios archivos pegados sin marca. Sin esta anotacion el modelo
+// no puede citar "archivo:linea", que es justo lo que hace verificable su
+// hallazgo; antes solo veia un volcado continuo. Los dos archivos van en la
+// MISMA carpeta para que caigan en el mismo modulo.
+const MULTI_INPUT = {
+  projectName: 'app',
+  code: [
+    '// ===== FILE: app/src/routes/auth.js =====',
+    'const db = require("../db");',
+    '// ===== FILE: app/src/routes/cart.js =====',
+    'const total = 0;',
+    'res.send(total);',
+  ].join('\n'),
+};
+
+let multiBody = '';
+await call(
+  { GEMINI_API_KEY: 'AIza-fake' },
+  (_url, init) => {
+    multiBody = init.body;
+    return Promise.resolve({ status: 200, ok: true, json: async () => okBody(1) });
+  },
+  MULTI_INPUT
+);
+
+// El cuerpo que se manda es JSON, asi que los saltos van escapados (\\n).
+check('marca el inicio de cada archivo del modulo',
+  /===== FILE: app\/src\/routes\/auth\.js =====/.test(multiBody) &&
+    /===== FILE: app\/src\/routes\/cart\.js =====/.test(multiBody));
+check('numera las lineas DENTRO de cada archivo (reinicia en 1)',
+  multiBody.includes('cart.js =====\\n1: const total = 0;\\n2: res.send(total);'));
+check('no mezcla las lineas de los dos archivos',
+  !multiBody.includes('res.send(total);\\n4:'), JSON.stringify(multiBody.slice(multiBody.indexOf('cart.js') - 20, multiBody.indexOf('cart.js') + 160)));
 
 console.log(fails === 0 ? '\nTODAS LAS PRUEBAS PASAN' : `\n${fails} prueba(s) fallan`);
 process.exit(fails === 0 ? 0 : 1);
