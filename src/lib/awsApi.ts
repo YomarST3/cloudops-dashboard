@@ -200,3 +200,36 @@ export async function reviewWithAi(payload: AiAnalyzeRequest): Promise<AiReviewR
   }
   return parseJsonOrThrow<AiReviewResponse>(response, '/api/ai-review');
 }
+
+export interface GitHubFetchFile {
+  path: string;
+  content: string;
+  size: number;
+}
+
+export interface GitHubFetchResponse {
+  owner?: string;
+  repo?: string;
+  branch?: string;
+  files?: GitHubFetchFile[];
+  skipped?: number;
+  /** Aviso no fatal (repo sin codigo utilizable). */
+  error?: string;
+}
+
+/**
+ * Descarga un repositorio publico de GitHub. El trabajo pesado (validar la URL,
+ * bajar el zipball, filtrar los archivos de codigo) lo hace el servidor; aqui
+ * solo se pide y se devuelve su respuesta. El timeout es holgado porque la
+ * descarga de un repo puede tardar.
+ */
+export async function fetchGitHubProject(url: string): Promise<GitHubFetchResponse> {
+  const response = await fetch('/api/github-fetch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+    signal: AbortSignal.timeout(60000),
+  });
+  return parseJsonOrThrow<GitHubFetchResponse>(response, '/api/github-fetch');
+}
+

@@ -14,6 +14,7 @@ import {
   ShieldX,
   Upload,
   FileCode2,
+  GitFork,
   RefreshCw,
   ChevronDown,
   ChevronUp,
@@ -47,6 +48,7 @@ import { useCloud } from '../context/CloudContext';
 import { useAuth } from '../hooks/useAuth';
 import { generateAnalysisReportPdf } from '../lib/pdf-report';
 import { resolveAnalysisPricing, type ResolvedService } from '../lib/analysis-pricing';
+import { fetchGitHubProject } from '../lib/awsApi';
 import type { SecurityFinding, ModuleAnalysis } from '../types/cloud';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -533,10 +535,12 @@ export const ProjectAnalyzer: React.FC = () => {
   // ── Form state ──
   const [projectName, setProjectName] = useState('');
   const [language, setLanguage] = useState('Auto-detectar');
-  // 'upload' = archivos/ZIP | 'paste' = pegar código | 'description' = texto
-  const [inputMode, setInputMode] = useState<'upload' | 'paste' | 'description'>('upload');
+  // 'upload' = archivos/ZIP | 'github' = repo publico | 'paste' = pegar código | 'description' = texto
+  const [inputMode, setInputMode] = useState<'upload' | 'github' | 'paste' | 'description'>('upload');
   const [code, setCode] = useState('');
   const [description, setDescription] = useState('');
+  const [githubUrl, setGithubUrl] = useState('');
+  const [isFetchingRepo, setIsFetchingRepo] = useState(false);
   const [loadedFiles, setLoadedFiles] = useState<LoadedFile[]>([]);
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -596,11 +600,72 @@ export const ProjectAnalyzer: React.FC = () => {
     }
   }, [projectName]);
 
+  /**
+   * Reparte lo que entra (por selector o por arrastre) entre ZIP y codigo
+   * fuente. Existe porque antes el selector principal descartaba los .zip como
+   * "no es codigo fuente": solo se podia subir un ZIP arrastrandolo al drop
+   * zone. Ahora tanto el input como el drop pasan por aqui.
+   */
+  const dispatchFiles = useCallback(async (items: File[]) => {
+    if (items.length === 0) return;
+    const zipFiles = items.filter((f) => f.name.toLowerCase().endsWith('.zip'));
+    const codeFiles = items.filter((f) => !f.name.toLowerCase().endsWith('.zip'));
+
+    if (zipFiles.length > 0) {
+      await processZipFile(zipFiles[0]);
+    }
+    if (codeFiles.length > 0) {
+      await processCodeFiles(codeFiles);
+    }
+  }, [processZipFile, processCodeFiles]);
+
+  /**
+   * Descarga un repo publico de GitHub. Los archivos que devuelve el servidor
+   * pasan a `loadedFiles` con la MISMA forma que un ZIP subido, asi que el
+   * reparto por lenguaje, la vista previa y el analisis no cambian en nada.
+   */
+  const handleFetchGitHub = useCallback(async () => {
+    const url = githubUrl.trim();
+    if (!url) {
+      setFileError('Pega la URL de un repositorio publico de GitHub.');
+      return;
+    }
+    setIsFetchingRepo(true);
+    setFileError(null);
+    try {
+      const data = await fetchGitHubProject(url);
+
+      if (!data.files || data.files.length === 0) {
+        setFileError(data.error || 'No se encontro codigo fuente en el repositorio.');
+        return;
+      }
+
+      const files: LoadedFile[] = data.files.map((f) => ({
+        name: f.path.split('/').pop() ?? f.path,
+        path: f.path,
+        size: f.size,
+        content: f.content,
+      }));
+
+      setLoadedFiles(files);
+      if (!projectName && data.owner && data.repo) {
+        setProjectName(`${data.owner}/${data.repo}`);
+      }
+      if (data.skipped && data.skipped > 0) {
+        setFileError(`Se cargaron ${files.length} archivos; ${data.skipped} quedaron fuera (no son codigo o estan en carpetas ignoradas).`);
+      }
+    } catch (err) {
+      setFileError(`No se pudo cargar el repositorio: ${err instanceof Error ? err.message : 'Error desconocido'}`);
+    } finally {
+      setIsFetchingRepo(false);
+    }
+  }, [githubUrl, projectName]);
+
   const handleFileInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
-    if (files.length === 0) return;
-    await processCodeFiles(files);
     e.target.value = '';
+    if (files.length === 0) return;
+    await dispatchFiles(files);
   };
 
   const handleZipInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -613,19 +678,8 @@ export const ProjectAnalyzer: React.FC = () => {
   const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    const items = Array.from(e.dataTransfer.files);
-    if (items.length === 0) return;
-
-    const zipFiles = items.filter((f) => f.name.endsWith('.zip'));
-    const codeFiles = items.filter((f) => !f.name.endsWith('.zip'));
-
-    if (zipFiles.length > 0) {
-      await processZipFile(zipFiles[0]);
-    }
-    if (codeFiles.length > 0) {
-      await processCodeFiles(codeFiles);
-    }
-  }, [processZipFile, processCodeFiles]);
+    await dispatchFiles(Array.from(e.dataTransfer.files));
+  }, [dispatchFiles]);
 
   const handleRemoveFile = (path: string) => {
     setLoadedFiles((prev) => prev.filter((f) => f.path !== path));
@@ -644,6 +698,9 @@ export const ProjectAnalyzer: React.FC = () => {
     if (inputMode === 'upload') {
       const included = loadedFiles.filter((f) => !f.skipped && f.content.trim());
       if (included.length === 0) e.input = 'Sube al menos un archivo de código o un ZIP para analizar.';
+    } else if (inputMode === 'github') {
+      const included = loadedFiles.filter((f) => !f.skipped && f.content.trim());
+      if (included.length === 0) e.input = 'Carga un repositorio de GitHub antes de analizar.';
     } else if (inputMode === 'paste' && code.trim().length < 20) {
       e.input = 'Pega al menos 20 caracteres de código para analizar.';
     } else if (inputMode === 'description' && description.trim().length < 30) {
@@ -665,7 +722,8 @@ export const ProjectAnalyzer: React.FC = () => {
     // justo lo que hacia indefendible el informe.
     let selection: FileSelection | null = null;
 
-    if (inputMode === 'upload') {
+    if (inputMode === 'upload' || inputMode === 'github') {
+      // Mismo camino que un ZIP: los archivos de GitHub ya estan en loadedFiles.
       selection = selectFiles(loadedFiles);
       finalCode = selection.code;
       setSelection(selection);
@@ -698,7 +756,7 @@ export const ProjectAnalyzer: React.FC = () => {
    * decir "172 archivos listos" mientras se envían 118 es mentir, y es
    * precisamente lo que hace indefendible un informe.
    */
-  const analysed = selection ?? (inputMode === 'upload' ? preview : null);
+  const analysed = selection ?? (inputMode === 'upload' || inputMode === 'github' ? preview : null);
 
   const allFindings = result
     ? result.modules.flatMap((m) => m.findings).filter((f, i, arr) =>
@@ -787,7 +845,7 @@ export const ProjectAnalyzer: React.FC = () => {
             Analizador IA de Proyectos
           </h1>
           <p className="text-sm text-[#64748B] dark:text-slate-400 mt-1">
-            Sube tu proyecto (ZIP o archivos sueltos), la IA evalúa la seguridad módulo por módulo y recomienda la infraestructura AWS con costos estimados.
+            Sube tu proyecto (ZIP o archivos sueltos), conecta un repositorio de GitHub, la IA evalúa la seguridad módulo por módulo y recomienda la infraestructura AWS con costos estimados.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -829,7 +887,7 @@ export const ProjectAnalyzer: React.FC = () => {
           <div>
             <h2 className="text-base font-bold text-[#1E293B] dark:text-white">Conectar Proyecto para Análisis</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Sube un ZIP, arrastra archivos, pega código o describe tu sistema.
+              Sube un ZIP, conecta un repositorio de GitHub, arrastra archivos, pega código o describe tu sistema.
             </p>
           </div>
           <button
@@ -884,6 +942,7 @@ export const ProjectAnalyzer: React.FC = () => {
           <div className="flex gap-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl w-fit">
             {[
               { key: 'upload', label: 'Subir Archivos / ZIP', icon: Upload },
+              { key: 'github', label: 'Repositorio GitHub', icon: GitFork },
               { key: 'paste', label: 'Pegar Código', icon: FileCode2 },
               { key: 'description', label: 'Describir Sistema', icon: Sparkles },
             ].map(({ key, label, icon: Icon }) => (
@@ -911,7 +970,7 @@ export const ProjectAnalyzer: React.FC = () => {
                 ref={fileInputRef}
                 type="file"
                 multiple
-                accept=".js,.jsx,.ts,.tsx,.mjs,.py,.java,.cs,.go,.php,.rb,.cpp,.c,.h,.rs,.swift,.kt,.vue,.svelte,.html,.sql"
+                accept=".js,.jsx,.ts,.tsx,.mjs,.py,.java,.cs,.go,.php,.rb,.cpp,.c,.h,.rs,.swift,.kt,.vue,.svelte,.html,.sql,.zip"
                 onChange={handleFileInputChange}
                 className="hidden"
               />
@@ -981,7 +1040,7 @@ export const ProjectAnalyzer: React.FC = () => {
                   className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
                 >
                   <PackageOpen className="w-3.5 h-3.5" />
-                  Seleccionar archivos sueltos
+                  Seleccionar archivos o ZIP
                 </button>
                 {loadedFiles.length > 0 && (
                   <button
@@ -1040,6 +1099,77 @@ export const ProjectAnalyzer: React.FC = () => {
                     </div>
                   )}
                 </>
+              )}
+
+              {errors.input && (
+                <p className="text-xs text-rose-500 flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5" />{errors.input}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* ── MODE: GitHub Repository ── */}
+          {inputMode === 'github' && (
+            <div className="space-y-3">
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-2">
+                URL del Repositorio <span className="text-rose-500">*</span>
+                <span className="text-slate-400 normal-case font-normal ml-2">(repositorio público)</span>
+              </label>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <div className="relative flex-1">
+                  <GitFork className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="url"
+                    value={githubUrl}
+                    onChange={(e) => setGithubUrl(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        void handleFetchGitHub();
+                      }
+                    }}
+                    placeholder="https://github.com/usuario/repositorio"
+                    className={`w-full pl-9 pr-4 py-2.5 rounded-xl border text-sm bg-slate-50 dark:bg-slate-800/80 text-slate-800 dark:text-white focus:outline-none focus:ring-2 transition-all ${
+                      errors.input
+                        ? 'border-rose-400 focus:ring-rose-400'
+                        : 'border-slate-200 dark:border-slate-700 focus:ring-blue-500 focus:border-blue-500'
+                    }`}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleFetchGitHub()}
+                  disabled={isFetchingRepo}
+                  className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold text-white bg-slate-800 dark:bg-slate-700 hover:bg-slate-900 dark:hover:bg-slate-600 disabled:opacity-60 transition-colors"
+                >
+                  {isFetchingRepo ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      Descargando...
+                    </>
+                  ) : (
+                    <>
+                      <GitFork className="w-3.5 h-3.5" />
+                      Cargar repositorio
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <p className="text-[11px] text-slate-400 dark:text-slate-500">
+                Se descarga el código del repositorio público y se analiza igual que un ZIP. Se ignoran
+                dependencias y artefactos de build (node_modules, dist, .git…).
+              </p>
+
+              {fileError && (
+                <p className="text-xs text-rose-500 flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5" />{fileError}
+                </p>
+              )}
+
+              {loadedFiles.length > 0 && !isFetchingRepo && (
+                <FileListPreview files={loadedFiles} onRemove={handleRemoveFile} />
               )}
 
               {errors.input && (
@@ -1632,7 +1762,7 @@ export const ProjectAnalyzer: React.FC = () => {
           <div>
             <p className="text-lg font-bold text-slate-800 dark:text-white mb-1">Listo para analizar tu proyecto</p>
             <p className="text-sm text-slate-500 dark:text-slate-400 max-w-md">
-              Sube un ZIP con tu proyecto, archivos de código sueltos, pega el código directamente o describe tu sistema. La IA evaluará la seguridad e identificará vulnerabilidades.
+              Sube un ZIP con tu proyecto, conecta un repositorio de GitHub, pega el código directamente o describe tu sistema. La IA evaluará la seguridad e identificará vulnerabilidades.
             </p>
           </div>
           <button
