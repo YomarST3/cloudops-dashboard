@@ -39,8 +39,23 @@ export const parseBearerToken = (header: unknown): string => {
  *
  * Se aceptan tanto los nombres VITE_* (que ya existen para el cliente) como los
  * nombres sin prefijo, para no obligar a duplicar configuracion.
+ *
+ * En Vercel la variable ya viene en process.env. En local (`npm run dev` con
+ * Vite, o `node server.mjs`) hay que leer el .env: Vite solo expone al codigo de
+ * api/ las variables VITE_*, asi que las secretas no llegan solas. Se hace aqui
+ * (patron de ai-review.ts) para que el endpoint funcione con cualquier arranque.
  */
+function loadEnvOnce() {
+  if (process.env.SUPABASE_SERVICE_ROLE_KEY) return;
+  try {
+    process.loadEnvFile();
+  } catch {
+    // Sin .env en disco: normal en Vercel y en Docker. No es un error.
+  }
+}
+
 function projectConfig() {
+  loadEnvOnce();
   const url =
     process.env.SUPABASE_URL ||
     process.env.VITE_SUPABASE_URL ||
