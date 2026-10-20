@@ -455,6 +455,13 @@ export async function generateAnalysisReportPdf(
   }
 
   // ── 3. Distribucion por severidad ─────────────────────────────────────────
+  // Guarda de pagina antes del titulo: sin ella el titulo se quedaba huerfano
+  // al final de la hoja y la tabla saltaba sola a la siguiente. Con esto, si no
+  // caben, pasan juntos.
+  if (y > CONTENT_BOTTOM - 45) {
+    doc.addPage();
+    y = CONTENT_TOP;
+  }
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(11.5);
   doc.setTextColor(...BRAND_DARK);
@@ -939,15 +946,14 @@ export async function generateAnalysisReportPdf(
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(7);
     doc.setTextColor(...MUTED);
-    // El texto de procedencia es largo: con una sola linea pisa el numero de
-    // pagina de la derecha. Se limita el ancho a la mitad de la hoja para que
-    // salte de linea solo y quede en dos renglones a la izquierda.
-    doc.text(
+    // El texto de procedencia es largo: si va en una sola linea pisa el numero
+    // de pagina de la derecha. Se parte en dos renglones con la mitad del ancho
+    // de la hoja; el numero de pagina queda alineado a la derecha del todo.
+    const footerLines = doc.splitTextToSize(
       'CloudOps Dashboard · Analisis estatico por patrones y CWE. No es un modelo de lenguaje.',
-      MARGIN,
-      FOOTER_Y + 5,
-      { maxWidth: CONTENT_W / 2 }
+      CONTENT_W * 0.62
     );
+    doc.text(footerLines, MARGIN, FOOTER_Y + 5);
     doc.text(`Pagina ${page} de ${pageCount}`, PAGE.width - MARGIN, FOOTER_Y + 5, { align: 'right' });
   }
 
