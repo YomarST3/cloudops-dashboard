@@ -27,6 +27,16 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(ROOT, 'dist');
 const API_DIR = path.join(ROOT, 'api');
 
+// Carga el .env del proyecto para que los handlers de api/*.ts vean sus
+// variables (GEMINI_API_KEY, SUPABASE_SERVICE_ROLE_KEY...). Sin esto, `npm
+// start` las ignora aunque esten escritas y el endpoint responde que faltan.
+// process.loadEnvFile existe en Node 20.12+; si no hay .env se ignora sin error.
+try {
+  process.loadEnvFile(path.join(ROOT, '.env'));
+} catch {
+  // Sin .env en disco: las variables deberan venir del entorno real.
+}
+
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 
