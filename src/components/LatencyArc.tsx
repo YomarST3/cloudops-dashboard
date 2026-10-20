@@ -1,6 +1,16 @@
 import React from 'react';
 import { buildArcPath, arcMidpoint, arcLength, latencyBand, type Point } from '../lib/geo';
 
+// Velocidad del brillo que recorre el arco, por banda de latencia: el verde
+// (baja latencia) va rapido, el amarillo intermedio y el rojo (alta latencia)
+// lento. Antes la velocidad salia de los ms, asi que el color y el ritmo no
+// se correspondian.
+const SWEEP_DUR: Record<'low' | 'mid' | 'high', number> = {
+  low: 0.9,
+  mid: 1.6,
+  high: 3.0,
+};
+
 interface LatencyArcProps {
   from: Point;
   to: Point;
@@ -39,7 +49,7 @@ export const LatencyArc: React.FC<LatencyArcProps> = ({
         strokeLinecap="round"
         strokeDasharray={`${length} ${length}`}
       >
-        <animate attributeName="stroke-dashoffset" from={length} to={0} dur={`${1.1 + latencyMs / 400}s`} repeatCount="indefinite" />
+        <animate attributeName="stroke-dashoffset" from={length} to={0} dur={`${SWEEP_DUR[band.id]}s`} repeatCount="indefinite" />
       </path>
       <circle cx={to.x} cy={to.y} r={6 + Math.min(5, latencyMs / 40)} fill={band.color} opacity={0.25}>
         <animate attributeName="r" values={`${6 + Math.min(5, latencyMs / 40)};${9 + Math.min(5, latencyMs / 40)};${6 + Math.min(5, latencyMs / 40)}`} dur="2.4s" repeatCount="indefinite" />
