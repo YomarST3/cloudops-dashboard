@@ -39,6 +39,21 @@ const SEVERITY: Record<SecurityFindingSeverity, { label: string; rgb: [number, n
   info: { label: 'Info', rgb: [100, 116, 139] },
 };
 
+/**
+ * Cuanto resta al puntaje cada hallazgo segun su severidad. Son los MISMOS
+ * numeros que usa el motor del servidor (PENALTIES en analyze.ts). Se repiten
+ * aqui a proposito: pdf-report corre en el navegador y no puede importar el
+ * motor de servidor sin arrastrar todo ese codigo al bundle. Si cambian alli,
+ * hay que cambiarlos aqui.
+ */
+const SEVERITY_WEIGHT: Record<SecurityFindingSeverity, number> = {
+  critical: 50,
+  high: 25,
+  medium: 8,
+  low: 3,
+  info: 1,
+};
+
 const INFRA_LABEL: Record<string, string> = {
   small: 'Pequeña',
   medium: 'Mediana',
@@ -446,16 +461,14 @@ export async function generateAnalysisReportPdf(
   doc.text('2. DISTRIBUCION DE HALLAZGOS POR SEVERIDAD', MARGIN, y);
   y += 7;
 
-  const total = result.totalFindings || 1;
   autoTable(doc, {
     startY: y,
-    head: [['Severidad', 'Cantidad', '% del total']],
+    head: [['Severidad', 'Cantidad', 'Peso en el score']],
     body: buckets.map<RowInput>((b) => {
-      const pct = ((b.count / total) * 100).toFixed(1);
       return [
         { content: SEVERITY[b.severity].label, styles: { textColor: SEVERITY[b.severity].rgb, fontStyle: 'bold' } },
         String(b.count),
-        `${pct}%`,
+        `${SEVERITY_WEIGHT[b.severity]}%`,
       ];
     }),
     theme: 'striped',
